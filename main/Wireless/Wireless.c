@@ -24,15 +24,15 @@ void Wireless_Init(void)
         1, 
         NULL, 
         0);
-    // BLE
-    xTaskCreatePinnedToCore(
-        BLE_Init, 
-        "BLE task",
-        4096, 
-        NULL, 
-        2, 
-        NULL, 
-        0);
+    // BLE (DISABLED TO PREVENT WATCHDOG TIMEOUT)
+    // xTaskCreatePinnedToCore(
+    //     BLE_Init,
+    //     "BLE task",
+    //     4096,
+    //     NULL,
+    //     2,
+    //     NULL,
+    //     0);
 }
 
 void WIFI_Init(void *arg)
@@ -47,6 +47,11 @@ void WIFI_Init(void *arg)
 
     WIFI_NUM = WIFI_Scan();
     printf("WIFI:%d\r\n",WIFI_NUM);
+
+    // Since BLE is disabled, mark scan as complete
+    BLE_Scan_Finish = 1;
+    if(WiFi_Scan_Finish == 1)
+        Scan_finish = 1;
     
     vTaskDelete(NULL);
 }

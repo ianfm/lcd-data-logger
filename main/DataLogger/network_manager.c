@@ -1,0 +1,493 @@
+#include "network_manager.h"
+#include "uart_manager.h"
+#include "adc_manager.h"
+#include "storage_manager.h"
+#include "data_logger.h"
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_http_server.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
+#include "cJSON.h"
+#include "config.h"
+#include <string.h>
+
+static const char* TAG = "NET_MGR";
+
+// WiFi event bits
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+// Network Manager State
+typedef struct {
+    bool initialized;
+    bool wifi_connected;
+    bool http_server_running;
+    httpd_handle_t http_server;
+    EventGroupHandle_t wifi_event_group;
+    int retry_count;
+    network_stats_t stats;
+} network_manager_state_t;
+
+static network_manager_state_t g_network_manager = {0};
+
+// WiFi Event Handler
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                              int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (g_network_manager.retry_count < NETWORK_MAX_RETRY) {
+            esp_wifi_connect();
+            g_network_manager.retry_count++;
+            ESP_LOGI(TAG, "Retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(g_network_manager.wifi_event_group, WIFI_FAIL_BIT);
+        }
+        g_network_manager.wifi_connected = false;
+        ESP_LOGI(TAG, "Connect to the AP fail");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        g_network_manager.retry_count = 0;
+        g_network_manager.wifi_connected = true;
+        xEventGroupSetBits(g_network_manager.wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+// HTTP API Handlers
+static esp_err_t status_handler(httpd_req_t *req) {
+    cJSON *json = cJSON_CreateObject();
+    cJSON *status = cJSON_CreateString("running");
+    cJSON *timestamp = cJSON_CreateNumber(esp_timer_get_time());
+    cJSON *uptime = cJSON_CreateNumber(esp_timer_get_time() / 1000000);
+
+    cJSON_AddItemToObject(json, "status", status);
+    cJSON_AddItemToObject(json, "timestamp", timestamp);
+    cJSON_AddItemToObject(json, "uptime_seconds", uptime);
+
+    // Add system info
+    cJSON *system = cJSON_CreateObject();
+    cJSON *free_heap = cJSON_CreateNumber(esp_get_free_heap_size());
+    cJSON *min_heap = cJSON_CreateNumber(esp_get_minimum_free_heap_size());
+    cJSON_AddItemToObject(system, "free_heap", free_heap);
+    cJSON_AddItemToObject(system, "min_free_heap", min_heap);
+    cJSON_AddItemToObject(json, "system", system);
+
+    char *json_string = cJSON_Print(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    free(json_string);
+    cJSON_Delete(json);
+
+    g_network_manager.stats.api_requests++;
+    return ESP_OK;
+}
+
+static esp_err_t data_latest_handler(httpd_req_t *req) {
+    cJSON *json = cJSON_CreateObject();
+    cJSON *timestamp = cJSON_CreateNumber(esp_timer_get_time());
+    cJSON_AddItemToObject(json, "timestamp", timestamp);
+
+    // Get UART data
+    cJSON *uart_data = cJSON_CreateObject();
+    for (int i = 0; i < CONFIG_UART_PORT_COUNT; i++) {
+        if (uart_manager_is_channel_active(i)) {
+            uart_data_packet_t packet;
+            if (uart_manager_get_data(i, &packet, 0) == ESP_OK) {
+                char port_name[16];
+                snprintf(port_name, sizeof(port_name), "port%d", i);
+
+                cJSON *port_data = cJSON_CreateObject();
+                cJSON *data_str = cJSON_CreateString((char*)packet.data);
+                cJSON *length = cJSON_CreateNumber(packet.length);
+                cJSON *seq = cJSON_CreateNumber(packet.sequence);
+
+                cJSON_AddItemToObject(port_data, "data", data_str);
+                cJSON_AddItemToObject(port_data, "length", length);
+                cJSON_AddItemToObject(port_data, "sequence", seq);
+                cJSON_AddItemToObject(uart_data, port_name, port_data);
+            }
+        }
+    }
+    cJSON_AddItemToObject(json, "uart", uart_data);
+
+    // Get ADC data
+    cJSON *adc_data = cJSON_CreateObject();
+    for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+        if (adc_manager_is_channel_enabled(i)) {
+            float voltage;
+            if (adc_manager_get_instant_reading(i, &voltage) == ESP_OK) {
+                char channel_name[16];
+                snprintf(channel_name, sizeof(channel_name), "channel%d", i);
+
+                cJSON *channel_data = cJSON_CreateObject();
+                cJSON *voltage_val = cJSON_CreateNumber(voltage);
+                cJSON_AddItemToObject(channel_data, "voltage", voltage_val);
+                cJSON_AddItemToObject(adc_data, channel_name, channel_data);
+            }
+        }
+    }
+    cJSON_AddItemToObject(json, "adc", adc_data);
+
+    char *json_string = cJSON_Print(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    free(json_string);
+    cJSON_Delete(json);
+
+    g_network_manager.stats.api_requests++;
+    return ESP_OK;
+}
+
+static esp_err_t config_get_handler(httpd_req_t *req) {
+    system_config_t* config = config_get_instance();
+
+    cJSON *json = cJSON_CreateObject();
+
+    // Device info
+    cJSON *device_name = cJSON_CreateString(config->device_name);
+    cJSON_AddItemToObject(json, "device_name", device_name);
+
+    // UART config
+    cJSON *uart_config = cJSON_CreateArray();
+    for (int i = 0; i < CONFIG_UART_PORT_COUNT; i++) {
+        cJSON *uart = cJSON_CreateObject();
+        cJSON *port = cJSON_CreateNumber(i);
+        cJSON *enabled = cJSON_CreateBool(config->uart_config[i].enabled);
+        cJSON *baud = cJSON_CreateNumber(config->uart_config[i].baud_rate);
+
+        cJSON_AddItemToObject(uart, "port", port);
+        cJSON_AddItemToObject(uart, "enabled", enabled);
+        cJSON_AddItemToObject(uart, "baud_rate", baud);
+        cJSON_AddItemToArray(uart_config, uart);
+    }
+    cJSON_AddItemToObject(json, "uart", uart_config);
+
+    // ADC config
+    cJSON *adc_config = cJSON_CreateArray();
+    for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+        cJSON *adc = cJSON_CreateObject();
+        cJSON *channel = cJSON_CreateNumber(i);
+        cJSON *enabled = cJSON_CreateBool(config->adc_config[i].enabled);
+        cJSON *sample_rate = cJSON_CreateNumber(config->adc_config[i].sample_rate_hz);
+
+        cJSON_AddItemToObject(adc, "channel", channel);
+        cJSON_AddItemToObject(adc, "enabled", enabled);
+        cJSON_AddItemToObject(adc, "sample_rate", sample_rate);
+        cJSON_AddItemToArray(adc_config, adc);
+    }
+    cJSON_AddItemToObject(json, "adc", adc_config);
+
+    char *json_string = cJSON_Print(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    free(json_string);
+    cJSON_Delete(json);
+
+    g_network_manager.stats.api_requests++;
+    return ESP_OK;
+}
+
+static esp_err_t test_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Running test suite via API");
+
+    cJSON *json = cJSON_CreateObject();
+    cJSON *status = cJSON_CreateString("running");
+    cJSON_AddItemToObject(json, "status", status);
+
+    char *json_string = cJSON_Print(json);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    free(json_string);
+    cJSON_Delete(json);
+
+    // Run test suite in background
+    esp_err_t test_result = data_logger_run_full_test_suite();
+    ESP_LOGI(TAG, "Test suite completed with result: %s",
+             test_result == ESP_OK ? "PASS" : "FAIL");
+
+    g_network_manager.stats.api_requests++;
+    return ESP_OK;
+}
+
+static esp_err_t root_handler(httpd_req_t *req) {
+    const char* html_page =
+        "<!DOCTYPE html>"
+        "<html><head><title>ESP32 Data Logger</title>"
+        "<style>"
+        "body { font-family: Arial, sans-serif; margin: 40px; }"
+        ".container { max-width: 800px; margin: 0 auto; }"
+        ".status { background: #f0f0f0; padding: 20px; border-radius: 5px; margin: 20px 0; }"
+        ".button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }"
+        ".button:hover { background: #45a049; }"
+        ".data { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 10px 0; }"
+        "</style></head><body>"
+        "<div class='container'>"
+        "<h1>ESP32-C6 Data Logger</h1>"
+        "<div class='status'>"
+        "<h2>System Status</h2>"
+        "<p>Data Logger: Running</p>"
+        "<p>WiFi: Connected</p>"
+        "<p>Storage: Active</p>"
+        "</div>"
+        "<div class='data'>"
+        "<h2>Quick Actions</h2>"
+        "<button class='button' onclick='runTest()'>Run Test Suite</button>"
+        "<button class='button' onclick='getStatus()'>Get Status</button>"
+        "<button class='button' onclick='getData()'>Get Latest Data</button>"
+        "</div>"
+        "<div id='results'></div>"
+        "<script>"
+        "function runTest() {"
+        "  fetch('/api/test').then(r => r.json()).then(d => {"
+        "    document.getElementById('results').innerHTML = '<div class=\"data\">Test Status: ' + d.status + '</div>';"
+        "  });"
+        "}"
+        "function getStatus() {"
+        "  fetch('/api/status').then(r => r.json()).then(d => {"
+        "    document.getElementById('results').innerHTML = '<div class=\"data\">Uptime: ' + d.uptime_seconds + 's<br>Free Heap: ' + d.system.free_heap + ' bytes</div>';"
+        "  });"
+        "}"
+        "function getData() {"
+        "  fetch('/api/data/latest').then(r => r.json()).then(d => {"
+        "    let html = '<div class=\"data\"><h3>Latest Data</h3>';"
+        "    if (d.adc) {"
+        "      for (let ch in d.adc) {"
+        "        html += ch + ': ' + d.adc[ch].voltage + 'V<br>';"
+        "      }"
+        "    }"
+        "    html += '</div>';"
+        "    document.getElementById('results').innerHTML = html;"
+        "  });"
+        "}"
+        "</script>"
+        "</div></body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html_page, strlen(html_page));
+
+    g_network_manager.stats.api_requests++;
+    return ESP_OK;
+}
+
+esp_err_t network_manager_init(void) {
+    if (g_network_manager.initialized) {
+        ESP_LOGW(TAG, "Network Manager already initialized");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Initializing Network Manager");
+
+    // Initialize WiFi event group
+    g_network_manager.wifi_event_group = xEventGroupCreate();
+    if (!g_network_manager.wifi_event_group) {
+        ESP_LOGE(TAG, "Failed to create WiFi event group");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Initialize TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Initialize WiFi
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    // Initialize statistics
+    memset(&g_network_manager.stats, 0, sizeof(network_stats_t));
+
+    g_network_manager.initialized = true;
+    ESP_LOGI(TAG, "Network Manager initialized");
+
+    return ESP_OK;
+}
+
+esp_err_t network_manager_start(void) {
+    if (!g_network_manager.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Starting Network Manager");
+
+    // Connect to WiFi
+    system_config_t* config = config_get_instance();
+    if (config->wifi_config.auto_connect) {
+        esp_err_t ret = network_manager_connect_wifi(config->wifi_config.ssid, config->wifi_config.password);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    // Start HTTP server
+    esp_err_t ret = network_manager_start_http_server();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Network Manager started");
+    return ESP_OK;
+}
+
+esp_err_t network_manager_connect_wifi(const char* ssid, const char* password) {
+    if (!ssid || !password) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", ssid);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false
+            },
+        },
+    };
+
+    strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Wait for connection
+    EventBits_t bits = xEventGroupWaitBits(g_network_manager.wifi_event_group,
+                                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                          pdFALSE,
+                                          pdFALSE,
+                                          portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to WiFi SSID: %s", ssid);
+        return ESP_OK;
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGI(TAG, "Failed to connect to WiFi SSID: %s", ssid);
+        return ESP_FAIL;
+    } else {
+        ESP_LOGE(TAG, "Unexpected WiFi event");
+        return ESP_ERR_INVALID_STATE;
+    }
+}
+
+esp_err_t network_manager_start_http_server(void) {
+    if (g_network_manager.http_server_running) {
+        ESP_LOGW(TAG, "HTTP server already running");
+        return ESP_OK;
+    }
+
+    system_config_t* config = config_get_instance();
+
+    httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
+    server_config.server_port = config->network_config.http_port;
+    server_config.max_open_sockets = config->network_config.max_clients;
+    server_config.task_priority = 5;
+    server_config.stack_size = 8192;
+
+    ESP_LOGI(TAG, "Starting HTTP server on port %d", server_config.server_port);
+
+    if (httpd_start(&g_network_manager.http_server, &server_config) == ESP_OK) {
+        // Register URI handlers
+        httpd_uri_t status_uri = {
+            .uri = "/api/status",
+            .method = HTTP_GET,
+            .handler = status_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &status_uri);
+
+        httpd_uri_t data_latest_uri = {
+            .uri = "/api/data/latest",
+            .method = HTTP_GET,
+            .handler = data_latest_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &data_latest_uri);
+
+        httpd_uri_t config_get_uri = {
+            .uri = "/api/config",
+            .method = HTTP_GET,
+            .handler = config_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &config_get_uri);
+
+        httpd_uri_t test_uri = {
+            .uri = "/api/test",
+            .method = HTTP_GET,
+            .handler = test_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &test_uri);
+
+        httpd_uri_t root_uri = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = root_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &root_uri);
+
+        g_network_manager.http_server_running = true;
+        ESP_LOGI(TAG, "HTTP server started successfully");
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "Failed to start HTTP server");
+    return ESP_FAIL;
+}
+
+bool network_manager_is_wifi_connected(void) {
+    return g_network_manager.wifi_connected;
+}
+
+bool network_manager_is_http_server_running(void) {
+    return g_network_manager.http_server_running;
+}
+
+esp_err_t network_manager_get_stats(network_stats_t* stats) {
+    if (!stats) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(stats, &g_network_manager.stats, sizeof(network_stats_t));
+    return ESP_OK;
+}
+
+esp_err_t network_manager_print_stats(void) {
+    ESP_LOGI(TAG, "=== Network Manager Statistics ===");
+    ESP_LOGI(TAG, "WiFi Connected: %s", g_network_manager.wifi_connected ? "Yes" : "No");
+    ESP_LOGI(TAG, "HTTP Server: %s", g_network_manager.http_server_running ? "Running" : "Stopped");
+    ESP_LOGI(TAG, "API Requests: %lu", g_network_manager.stats.api_requests);
+    ESP_LOGI(TAG, "WebSocket Connections: %lu", g_network_manager.stats.websocket_connections);
+    ESP_LOGI(TAG, "Bytes Sent: %lu", g_network_manager.stats.bytes_sent);
+    ESP_LOGI(TAG, "Connection Errors: %lu", g_network_manager.stats.connection_errors);
+
+    return ESP_OK;
+}
