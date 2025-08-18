@@ -8,8 +8,11 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lvgl.h"
 
 // Original demo components
 #include "ST7789.h"
@@ -24,6 +27,8 @@
 #include "data_logger.h"
 
 static const char* TAG = "MAIN";
+
+
 
 static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "=== ESP32-C6 Data Logger Starting ===");
@@ -87,33 +92,33 @@ void app_main(void)
         esp_restart();
     }
 
-    // Initialize data logger (RE-ENABLED)
-    ESP_LOGI(TAG, "Re-enabling data logger initialization...");
-    ret = data_logger_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
-        // Continue with basic functionality
-    }
+    // Initialize data logger (DISABLED - WiFi conflict)
+    ESP_LOGI(TAG, "Skipping data logger to avoid WiFi conflicts...");
+    // ret = data_logger_init();
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
+    //     // Continue with basic functionality
+    // }
 
-    // Start data logger (RE-ENABLED)
-    ret = data_logger_start();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));
-    }
+    // Start data logger (DISABLED - WiFi conflict)
+    // ret = data_logger_start();
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));
+    // }
 
-    // Run self test (RE-ENABLED)
-    ret = data_logger_run_self_test();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Self test completed with warnings");
-    }
+    // Run self test (DISABLED - WiFi conflict)
+    // ret = data_logger_run_self_test();
+    // if (ret != ESP_OK) {
+    //     ESP_LOGW(TAG, "Self test completed with warnings");
+    // }
 
     // Print initial status
     data_logger_print_status();
 
-    // Show initial display (RE-ENABLED)
-    ESP_LOGI(TAG, "Starting LVGL demo...");
+    // Show initial display (EXACTLY like original demo)
+    ESP_LOGI(TAG, "Starting original LVGL demo...");
     Lvgl_Example1();
-    ESP_LOGI(TAG, "LVGL demo started");
+    ESP_LOGI(TAG, "Original LVGL demo started");
 
     ESP_LOGI(TAG, "Data logger running, entering main loop");
 

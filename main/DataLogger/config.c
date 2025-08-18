@@ -73,7 +73,7 @@ esp_err_t config_load_defaults(system_config_t* config) {
     }
     
     // WiFi Configuration
-    strncpy(config->wifi_config.ssid, "goodmachine", sizeof(config->wifi_config.ssid) - 1);
+    strncpy(config->wifi_config.ssid, "Good Machine", sizeof(config->wifi_config.ssid) - 1);
     strncpy(config->wifi_config.password, "1500trains", sizeof(config->wifi_config.password) - 1);
     config->wifi_config.auto_connect = true;
     config->wifi_config.power_save_mode = 1; // WIFI_PS_MIN_MODEM
