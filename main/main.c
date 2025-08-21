@@ -33,6 +33,8 @@ static const char* TAG = "MAIN";
 static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "=== ESP32-C6 Data Logger Starting ===");
 
+    // TODO Ian: DUPLICATION CONFLICT - config_init() calls nvs_flash_init()
+    // but Wireless_Init() also calls nvs_flash_init() later
     // Initialize configuration system
     esp_err_t ret = config_init();
     if (ret != ESP_OK) {
@@ -61,6 +63,8 @@ static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "Initializing RGB...");
     RGB_Init();
 
+    // TODO Ian: POTENTIAL CONFLICT - SD_Init() here conflicts with storage_manager_init()
+    // in DataLogger if both try to mount SD card filesystem
     ESP_LOGI(TAG, "Initializing SD...");
     SD_Init();
 
@@ -70,14 +74,17 @@ static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "Setting backlight...");
     BK_Light(config->display_config.brightness);
 
+    // TODO Ian: POTENTIAL CONFLICT - LVGL_Init() here conflicts with display_manager_init()
+    // in DataLogger if both try to initialize LVGL (currently display_manager is disabled)
     ESP_LOGI(TAG, "Initializing LVGL...");
     LVGL_Init();
 
     ESP_LOGI(TAG, "Display initialization complete");
 
-    // Initialize WiFi (RE-ENABLING TO TEST)
-    ESP_LOGI(TAG, "Re-enabling WiFi initialization...");
-    Wireless_Init();
+    // WiFi initialization now handled by DataLogger network_manager
+    // Original Wireless_Init() functionality integrated into network_manager_start()
+    // This eliminates all initialization conflicts and provides better architecture
+    ESP_LOGI(TAG, "WiFi will be initialized by DataLogger network manager");
 
     ESP_LOGI(TAG, "System initialization complete");
     return ESP_OK;
@@ -92,15 +99,15 @@ void app_main(void)
         esp_restart();
     }
 
-    // Initialize data logger (DISABLED - WiFi conflict)
-    ESP_LOGI(TAG, "Skipping data logger to avoid WiFi conflicts...");
+    // Initialize data logger (now with unified WiFi management)
+    ESP_LOGI(TAG, "Initializing data logger with integrated network management...");
     ret = data_logger_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
         // Continue with basic functionality
     }
 
-    // Start data logger (DISABLED - WiFi conflict)
+    // Start data logger (includes WiFi scan + connection + HTTP server)
     ret = data_logger_start();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));

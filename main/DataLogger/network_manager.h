@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "esp_wifi.h"
 #include "config.h"
 #include "cJSON.h"
 #include <stdint.h>
@@ -44,6 +45,18 @@ esp_err_t network_manager_connect_wifi(const char* ssid, const char* password);
 esp_err_t network_manager_disconnect_wifi(void);
 bool network_manager_is_wifi_connected(void);
 esp_err_t network_manager_get_ip_info(char* ip_str, size_t max_len);
+
+// WiFi Scanning (replaces original Wireless module functionality)
+esp_err_t network_manager_scan_wifi(uint16_t* ap_count);
+esp_err_t network_manager_get_scan_results(wifi_ap_record_t* ap_records, uint16_t* ap_count);
+bool network_manager_is_scan_complete(void);
+uint16_t network_manager_get_wifi_count(void);
+esp_err_t network_manager_perform_initial_scan(void);  // Replaces Wireless_Init() functionality
+
+// Compatibility layer - global variables (replaces Wireless.c exports)
+extern uint16_t WIFI_NUM;
+extern uint16_t BLE_NUM;
+extern bool Scan_finish;
 
 // HTTP Server Management
 esp_err_t network_manager_start_http_server(void);

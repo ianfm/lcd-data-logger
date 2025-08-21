@@ -15,9 +15,11 @@
 
 
 
-extern uint16_t BLE_NUM;
-extern uint16_t WIFI_NUM;
-extern bool Scan_finish;
+// TODO Ian: Global variables now managed by network_manager.c
+// Include network_manager.h instead for access to these variables
+// extern uint16_t BLE_NUM;
+// extern uint16_t WIFI_NUM;
+// extern bool Scan_finish;
 
 void Wireless_Init(void);
 void WIFI_Init(void *arg);

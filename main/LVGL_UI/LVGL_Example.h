@@ -5,7 +5,7 @@
 
 #include "LVGL_Driver.h"
 #include "SD_SPI.h"
-#include "Wireless.h"
+#include "network_manager.h"  // Changed from Wireless.h - now using unified network manager
 
 #define EXAMPLE1_LVGL_TICK_PERIOD_MS  1000
 

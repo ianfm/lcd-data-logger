@@ -1,13 +1,18 @@
 #include "Wireless.h"
+#include "network_manager.h"  // For access to global variables now managed by network_manager
 
-uint16_t BLE_NUM = 0;
-uint16_t WIFI_NUM = 0;
-bool Scan_finish = 0;
+// TODO Ian: Global variables moved to network_manager.c for unified architecture
+// These are now managed by the DataLogger network manager
+// uint16_t BLE_NUM = 0;
+// uint16_t WIFI_NUM = 0;
+// bool Scan_finish = 0;
 
 bool WiFi_Scan_Finish = 0;
 bool BLE_Scan_Finish = 0;
 void Wireless_Init(void)
 {
+    // TODO Ian: DUPLICATION CONFLICT - nvs_flash_init() already called in config_init()
+    // This causes no error but is redundant initialization
     // Initialize NVS.
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -37,13 +42,18 @@ void Wireless_Init(void)
 
 void WIFI_Init(void *arg)
 {
-    esp_netif_init();                                                     
-    esp_event_loop_create_default();                                      
-    esp_netif_create_default_wifi_sta();                                 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();                 
-    esp_wifi_init(&cfg);                                      
-    esp_wifi_set_mode(WIFI_MODE_STA);              
-    esp_wifi_start();                            
+    // TODO Ian: CRITICAL CONFLICTS with network_manager_init():
+    // - esp_netif_init() duplicate (harmless but redundant)
+    // - esp_event_loop_create_default() duplicate (harmless but redundant)
+    // - esp_netif_create_default_wifi_sta() CAUSES "duplicate key" ERROR!
+    // - esp_wifi_init() duplicate (causes error)
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 
     WIFI_NUM = WIFI_Scan();
     printf("WIFI:%d\r\n",WIFI_NUM);

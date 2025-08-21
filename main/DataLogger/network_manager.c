@@ -17,11 +17,21 @@
 #include "config.h"
 #include <string.h>
 
+// Compatibility layer - replaces original Wireless module global variables
+uint16_t WIFI_NUM = 0;  // Number of WiFi APs found (replaces Wireless.c)
+uint16_t BLE_NUM = 0;   // Number of BLE devices found (not implemented yet)
+bool Scan_finish = 0;   // Scan completion status (replaces Wireless.c)
+
 static const char* TAG = "NET_MGR";
 
 // WiFi event bits
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+#define WIFI_SCAN_DONE_BIT BIT2
+#define WIFI_STA_START_BIT BIT3
+
+// WiFi Scanning Configuration
+#define NETWORK_MAX_SCAN_RESULTS 20
 
 // Network Manager State
 typedef struct {
@@ -32,6 +42,11 @@ typedef struct {
     EventGroupHandle_t wifi_event_group;
     int retry_count;
     network_stats_t stats;
+    // WiFi Scanning (replaces original Wireless module)
+    bool scan_complete;
+    uint16_t wifi_ap_count;
+    wifi_ap_record_t* scan_results;
+    uint16_t max_scan_results;
 } network_manager_state_t;
 
 static network_manager_state_t g_network_manager = {0};
@@ -40,7 +55,9 @@ static network_manager_state_t g_network_manager = {0};
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                               int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        ESP_LOGI(TAG, "WiFi STA started");
+        xEventGroupSetBits(g_network_manager.wifi_event_group, WIFI_STA_START_BIT);
+        // Don't auto-connect here - let network_manager_connect_wifi handle it
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (g_network_manager.retry_count < NETWORK_MAX_RETRY) {
             esp_wifi_connect();
@@ -57,6 +74,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         g_network_manager.retry_count = 0;
         g_network_manager.wifi_connected = true;
         xEventGroupSetBits(g_network_manager.wifi_event_group, WIFI_CONNECTED_BIT);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
+        // WiFi scan completed - replaces original Wireless module functionality
+        ESP_LOGI(TAG, "WiFi scan completed");
+        g_network_manager.scan_complete = true;
+        xEventGroupSetBits(g_network_manager.wifi_event_group, WIFI_SCAN_DONE_BIT);
     }
 }
 
@@ -303,7 +325,7 @@ esp_err_t network_manager_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Initialize TCP/IP stack
+    // Initialize TCP/IP stack (now the single source of WiFi initialization)
     ESP_ERROR_CHECK(esp_netif_init());
 
     // Create event loop only if it doesn't exist
@@ -325,6 +347,16 @@ esp_err_t network_manager_init(void) {
     // Initialize statistics
     memset(&g_network_manager.stats, 0, sizeof(network_stats_t));
 
+    // Initialize WiFi scanning (replaces original Wireless module)
+    g_network_manager.scan_complete = false;
+    g_network_manager.wifi_ap_count = 0;
+    g_network_manager.max_scan_results = NETWORK_MAX_SCAN_RESULTS;
+    g_network_manager.scan_results = malloc(sizeof(wifi_ap_record_t) * NETWORK_MAX_SCAN_RESULTS);
+    if (!g_network_manager.scan_results) {
+        ESP_LOGE(TAG, "Failed to allocate memory for WiFi scan results");
+        return ESP_ERR_NO_MEM;
+    }
+
     g_network_manager.initialized = true;
     ESP_LOGI(TAG, "Network Manager initialized");
 
@@ -338,10 +370,26 @@ esp_err_t network_manager_start(void) {
 
     ESP_LOGI(TAG, "Starting Network Manager");
 
+    // Start WiFi and wait for it to be ready
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Wait for WiFi to be ready (check STA_START event)
+    EventBits_t bits = xEventGroupWaitBits(g_network_manager.wifi_event_group,
+                                          WIFI_STA_START_BIT,
+                                          pdFALSE,
+                                          pdFALSE,
+                                          pdMS_TO_TICKS(5000));
+
+    if (!(bits & WIFI_STA_START_BIT)) {
+        ESP_LOGW(TAG, "WiFi not ready after 5 seconds, continuing anyway");
+    }
+
     // Connect to WiFi
     system_config_t* config = config_get_instance();
+    esp_err_t ret = ESP_OK;
     if (config->wifi_config.auto_connect) {
-        esp_err_t ret = network_manager_connect_wifi(config->wifi_config.ssid, config->wifi_config.password);
+        ret = network_manager_connect_wifi(config->wifi_config.ssid, config->wifi_config.password);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
             return ret;
@@ -349,7 +397,7 @@ esp_err_t network_manager_start(void) {
     }
 
     // Start HTTP server
-    esp_err_t ret = network_manager_start_http_server();
+    ret = network_manager_start_http_server();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
         return ret;
@@ -379,9 +427,8 @@ esp_err_t network_manager_connect_wifi(const char* ssid, const char* password) {
     strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_connect());
 
     // Wait for connection
     EventBits_t bits = xEventGroupWaitBits(g_network_manager.wifi_event_group,
@@ -494,6 +541,125 @@ esp_err_t network_manager_print_stats(void) {
     ESP_LOGI(TAG, "WebSocket Connections: %lu", g_network_manager.stats.websocket_connections);
     ESP_LOGI(TAG, "Bytes Sent: %lu", g_network_manager.stats.bytes_sent);
     ESP_LOGI(TAG, "Connection Errors: %lu", g_network_manager.stats.connection_errors);
+    ESP_LOGI(TAG, "WiFi APs Found: %d", g_network_manager.wifi_ap_count);
+
+    return ESP_OK;
+}
+
+// WiFi Scanning Functions (replaces original Wireless module functionality)
+esp_err_t network_manager_scan_wifi(uint16_t* ap_count) {
+    if (!g_network_manager.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Starting WiFi scan...");
+
+    // Reset scan state
+    g_network_manager.scan_complete = false;
+    g_network_manager.wifi_ap_count = 0;
+
+    // Start WiFi scan
+    esp_err_t ret = esp_wifi_scan_start(NULL, false);  // Non-blocking scan
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start WiFi scan: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Wait for scan to complete
+    EventBits_t bits = xEventGroupWaitBits(g_network_manager.wifi_event_group,
+                                          WIFI_SCAN_DONE_BIT,
+                                          pdTRUE,  // Clear bit after waiting
+                                          pdFALSE,
+                                          pdMS_TO_TICKS(10000));  // 10 second timeout
+
+    if (!(bits & WIFI_SCAN_DONE_BIT)) {
+        ESP_LOGE(TAG, "WiFi scan timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Get scan results
+    uint16_t max_records = g_network_manager.max_scan_results;
+    ret = esp_wifi_scan_get_ap_records(&max_records, g_network_manager.scan_results);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get scan results: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    g_network_manager.wifi_ap_count = max_records;
+
+    // Update compatibility layer global variables (replaces Wireless.c)
+    WIFI_NUM = g_network_manager.wifi_ap_count;
+    Scan_finish = 1;  // Mark scan as complete
+
+    if (ap_count) {
+        *ap_count = g_network_manager.wifi_ap_count;
+    }
+
+    ESP_LOGI(TAG, "WiFi scan completed. Found %d access points", g_network_manager.wifi_ap_count);
+    printf("WIFI:%d\r\n", WIFI_NUM);  // Match original Wireless module output
+
+    // Print scan results (like original Wireless module)
+    for (int i = 0; i < g_network_manager.wifi_ap_count; i++) {
+        ESP_LOGI(TAG, "AP %d: SSID=%s, RSSI=%d, Channel=%d",
+                 i, g_network_manager.scan_results[i].ssid,
+                 g_network_manager.scan_results[i].rssi,
+                 g_network_manager.scan_results[i].primary);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t network_manager_get_scan_results(wifi_ap_record_t* ap_records, uint16_t* ap_count) {
+    if (!ap_records || !ap_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!g_network_manager.initialized || !g_network_manager.scan_complete) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint16_t copy_count = (*ap_count < g_network_manager.wifi_ap_count) ?
+                          *ap_count : g_network_manager.wifi_ap_count;
+
+    memcpy(ap_records, g_network_manager.scan_results, sizeof(wifi_ap_record_t) * copy_count);
+    *ap_count = copy_count;
+
+    return ESP_OK;
+}
+
+bool network_manager_is_scan_complete(void) {
+    return g_network_manager.scan_complete;
+}
+
+uint16_t network_manager_get_wifi_count(void) {
+    return g_network_manager.wifi_ap_count;
+}
+
+esp_err_t network_manager_perform_initial_scan(void) {
+    if (!g_network_manager.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Performing initial WiFi scan (replaces Wireless_Init)");
+
+    // Reset compatibility layer variables
+    WIFI_NUM = 0;
+    BLE_NUM = 0;  // BLE scanning not implemented yet
+    Scan_finish = 0;
+
+    // Perform WiFi scan
+    uint16_t ap_count = 0;
+    esp_err_t ret = network_manager_scan_wifi(&ap_count);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Initial WiFi scan failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Since BLE is disabled in original code, mark BLE scan as complete
+    // BLE_NUM remains 0
+    // Scan_finish is already set to 1 by network_manager_scan_wifi
+
+    ESP_LOGI(TAG, "Initial scan complete - WiFi: %d APs, BLE: %d devices", WIFI_NUM, BLE_NUM);
 
     return ESP_OK;
 }

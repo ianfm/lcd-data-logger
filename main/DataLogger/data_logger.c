@@ -71,6 +71,9 @@ esp_err_t data_logger_init(void) {
         return ret;
     }
 
+    // TODO Ian: POTENTIAL CONFLICT - storage_manager uses SD card filesystem
+    // which may conflict with SD_Init() in main.c if both try to mount same SD card
+    // Currently no direct conflict as storage_manager doesn't mount SD, just uses files
     // Initialize Storage Manager
     ret = storage_manager_init();
     if (ret != ESP_OK) {
@@ -78,13 +81,15 @@ esp_err_t data_logger_init(void) {
         return ret;
     }
 
-    // Initialize Network Manager
+    // Initialize Network Manager (now the single source of WiFi functionality)
     ret = network_manager_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize Network Manager: %s", esp_err_to_name(ret));
         return ret;
     }
 
+    // TODO Ian: POTENTIAL CONFLICT - display_manager_init() would conflict with LVGL_Init()
+    // in main.c if both try to initialize LVGL system (currently disabled to avoid conflict)
     // Initialize Display Manager (disabled to avoid conflict with original LVGL demo)
     // ret = display_manager_init();
     // if (ret != ESP_OK) {

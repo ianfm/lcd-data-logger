@@ -18,7 +18,9 @@ esp_err_t config_init(void) {
     if (g_config_initialized) {
         return ESP_OK;
     }
-    
+
+    // TODO Ian: DUPLICATION CONFLICT - Wireless_Init() also calls nvs_flash_init()
+    // This is called first, so it succeeds, but Wireless_Init() call is redundant
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -26,19 +28,40 @@ esp_err_t config_init(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    
-    // Load default configuration
-    config_load_defaults(&g_system_config);
-    
-    // Try to load from NVS, fall back to defaults if not found
-    if (config_load_from_nvs(&g_system_config) != ESP_OK) {
+
+    // Load default configuration first
+    system_config_t default_config;
+    config_load_defaults(&default_config);
+
+    // Try to load from NVS
+    system_config_t nvs_config;
+    if (config_load_from_nvs(&nvs_config) == ESP_OK) {
+        ESP_LOGI(TAG, "Configuration loaded from NVS");
+
+        // Check if WiFi config matches current defaults
+        if (strcmp(nvs_config.wifi_config.ssid, default_config.wifi_config.ssid) != 0 ||
+            strcmp(nvs_config.wifi_config.password, default_config.wifi_config.password) != 0) {
+            ESP_LOGW(TAG, "NVS WiFi config differs from code defaults:");
+            ESP_LOGW(TAG, "  NVS: SSID='%s'", nvs_config.wifi_config.ssid);
+            ESP_LOGW(TAG, "  Code: SSID='%s'", default_config.wifi_config.ssid);
+            ESP_LOGW(TAG, "Updating NVS with current code defaults");
+
+            // Use defaults and save to NVS
+            memcpy(&g_system_config, &default_config, sizeof(system_config_t));
+            config_save_to_nvs(&g_system_config);
+        } else {
+            // NVS matches defaults, use NVS config
+            memcpy(&g_system_config, &nvs_config, sizeof(system_config_t));
+        }
+    } else {
         ESP_LOGI(TAG, "No saved configuration found, using defaults");
+        memcpy(&g_system_config, &default_config, sizeof(system_config_t));
         config_save_to_nvs(&g_system_config);
     }
-    
+
     g_config_initialized = true;
     ESP_LOGI(TAG, "Configuration system initialized");
-    
+
     return ESP_OK;
 }
 
@@ -73,8 +96,10 @@ esp_err_t config_load_defaults(system_config_t* config) {
     }
     
     // WiFi Configuration
-    strncpy(config->wifi_config.ssid, "Good Machine", sizeof(config->wifi_config.ssid) - 1);
-    strncpy(config->wifi_config.password, "1500trains", sizeof(config->wifi_config.password) - 1);
+    // strncpy(config->wifi_config.ssid, "Good Machine", sizeof(config->wifi_config.ssid) - 1);
+    // strncpy(config->wifi_config.password, "1500trains", sizeof(config->wifi_config.password) - 1);
+    strncpy(config->wifi_config.ssid, "skrrrpshop", sizeof(config->wifi_config.ssid) - 1);
+    strncpy(config->wifi_config.password, "$lickr1ck", sizeof(config->wifi_config.password) - 1);
     config->wifi_config.auto_connect = true;
     config->wifi_config.power_save_mode = 1; // WIFI_PS_MIN_MODEM
     
