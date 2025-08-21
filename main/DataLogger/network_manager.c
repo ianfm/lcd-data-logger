@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "cJSON.h"
@@ -33,6 +34,15 @@ static const char* TAG = "NET_MGR";
 // WiFi Scanning Configuration
 #define NETWORK_MAX_SCAN_RESULTS 20
 
+// WebSocket client tracking
+typedef struct {
+    httpd_handle_t server;
+    int fd;
+    bool active;
+} websocket_client_t;
+
+#define MAX_WEBSOCKET_CLIENTS 4
+
 // Network Manager State
 typedef struct {
     bool initialized;
@@ -47,6 +57,11 @@ typedef struct {
     uint16_t wifi_ap_count;
     wifi_ap_record_t* scan_results;
     uint16_t max_scan_results;
+    // WebSocket support
+    websocket_client_t websocket_clients[MAX_WEBSOCKET_CLIENTS];
+    TaskHandle_t websocket_task;
+    QueueHandle_t websocket_queue;
+    bool websocket_running;
 } network_manager_state_t;
 
 static network_manager_state_t g_network_manager = {0};
@@ -276,6 +291,83 @@ static esp_err_t test_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// WebSocket handler based on ESP-IDF example
+static esp_err_t websocket_handler(httpd_req_t *req) {
+    if (req->method == HTTP_GET) {
+        ESP_LOGI(TAG, "WebSocket handshake done, new connection opened");
+
+        // Register client
+        int client_id = -1;
+        for (int i = 0; i < MAX_WEBSOCKET_CLIENTS; i++) {
+            if (!g_network_manager.websocket_clients[i].active) {
+                client_id = i;
+                break;
+            }
+        }
+
+        if (client_id != -1) {
+            g_network_manager.websocket_clients[client_id].server = req->handle;
+            g_network_manager.websocket_clients[client_id].fd = httpd_req_to_sockfd(req);
+            g_network_manager.websocket_clients[client_id].active = true;
+            ESP_LOGI(TAG, "WebSocket client %d registered (fd: %d)", client_id,
+                     g_network_manager.websocket_clients[client_id].fd);
+        }
+
+        return ESP_OK;
+    }
+
+    // Handle WebSocket frames
+    httpd_ws_frame_t ws_pkt;
+    uint8_t *buf = NULL;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+
+    // First call to get frame length
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ws_recv_frame failed to get frame len with %d", ret);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "WebSocket frame len is %d", ws_pkt.len);
+    if (ws_pkt.len) {
+        // Allocate buffer for payload
+        buf = calloc(1, ws_pkt.len + 1);
+        if (buf == NULL) {
+            ESP_LOGE(TAG, "Failed to calloc memory for buf");
+            return ESP_ERR_NO_MEM;
+        }
+        ws_pkt.payload = buf;
+
+        // Second call to get frame payload
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_ws_recv_frame failed with %d", ret);
+            free(buf);
+            return ret;
+        }
+        ESP_LOGI(TAG, "Got WebSocket packet with message: %s", ws_pkt.payload);
+    }
+
+    // Send welcome message back
+    const char* welcome = "{\"type\":\"connected\",\"message\":\"ESP32 ADC stream ready\"}";
+    httpd_ws_frame_t ws_response;
+    memset(&ws_response, 0, sizeof(httpd_ws_frame_t));
+    ws_response.payload = (uint8_t*)welcome;
+    ws_response.len = strlen(welcome);
+    ws_response.type = HTTPD_WS_TYPE_TEXT;
+
+    ret = httpd_ws_send_frame(req, &ws_response);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ws_send_frame failed with %d", ret);
+    }
+
+    if (buf) {
+        free(buf);
+    }
+    return ret;
+}
+
 static esp_err_t root_handler(httpd_req_t *req) {
     const char* html_page =
         "<!DOCTYPE html>"
@@ -336,6 +428,66 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// WebSocket streaming task
+static void websocket_streaming_task(void* pvParameters) {
+    ESP_LOGI(TAG, "WebSocket streaming task started");
+
+    adc_data_packet_t adc_packet;
+
+    while (g_network_manager.websocket_running) {
+        // Get ADC data from queue
+        if (adc_manager_get_data(&adc_packet, 50) == ESP_OK) {
+            // Create JSON message
+            cJSON *json = cJSON_CreateObject();
+            cJSON *type = cJSON_CreateString("data");
+            cJSON *timestamp = cJSON_CreateNumber(adc_packet.timestamp_us);
+            cJSON *channel = cJSON_CreateNumber(adc_packet.channel);
+            cJSON *voltage = cJSON_CreateNumber(adc_packet.filtered_voltage);
+            cJSON *raw = cJSON_CreateNumber(adc_packet.raw_value);
+            cJSON *sequence = cJSON_CreateNumber(adc_packet.sequence);
+
+            cJSON_AddItemToObject(json, "type", type);
+            cJSON_AddItemToObject(json, "timestamp", timestamp);
+            cJSON_AddItemToObject(json, "channel", channel);
+            cJSON_AddItemToObject(json, "voltage", voltage);
+            cJSON_AddItemToObject(json, "raw", raw);
+            cJSON_AddItemToObject(json, "sequence", sequence);
+
+            char *json_string = cJSON_Print(json);
+
+            // Send to all active WebSocket clients
+            for (int i = 0; i < MAX_WEBSOCKET_CLIENTS; i++) {
+                if (g_network_manager.websocket_clients[i].active) {
+                    httpd_ws_frame_t ws_pkt;
+                    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+                    ws_pkt.payload = (uint8_t*)json_string;
+                    ws_pkt.len = strlen(json_string);
+                    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+
+                    esp_err_t ret = httpd_ws_send_frame_async(
+                        g_network_manager.websocket_clients[i].server,
+                        g_network_manager.websocket_clients[i].fd,
+                        &ws_pkt);
+
+                    if (ret != ESP_OK) {
+                        ESP_LOGW(TAG, "WebSocket client %d disconnected", i);
+                        g_network_manager.websocket_clients[i].active = false;
+                    }
+                }
+            }
+
+            free(json_string);
+            cJSON_Delete(json);
+        }
+
+        // Small delay to prevent overwhelming clients
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGI(TAG, "WebSocket streaming task stopped");
+    vTaskDelete(NULL);
+}
+
 esp_err_t network_manager_init(void) {
     if (g_network_manager.initialized) {
         ESP_LOGW(TAG, "Network Manager already initialized");
@@ -382,6 +534,11 @@ esp_err_t network_manager_init(void) {
         ESP_LOGE(TAG, "Failed to allocate memory for WiFi scan results");
         return ESP_ERR_NO_MEM;
     }
+
+    // Initialize WebSocket support
+    memset(g_network_manager.websocket_clients, 0, sizeof(g_network_manager.websocket_clients));
+    g_network_manager.websocket_running = false;
+    g_network_manager.websocket_task = NULL;
 
     g_network_manager.initialized = true;
     ESP_LOGI(TAG, "Network Manager initialized");
@@ -488,6 +645,8 @@ esp_err_t network_manager_start_http_server(void) {
     server_config.max_open_sockets = config->network_config.max_clients;
     server_config.task_priority = 5;
     server_config.stack_size = 8192;
+    server_config.enable_so_linger = true;
+    server_config.linger_timeout = 0;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d", server_config.server_port);
 
@@ -533,8 +692,28 @@ esp_err_t network_manager_start_http_server(void) {
         };
         httpd_register_uri_handler(g_network_manager.http_server, &root_uri);
 
+        // Register WebSocket handler
+        httpd_uri_t websocket_uri = {
+            .uri = "/ws",
+            .method = HTTP_GET,
+            .handler = websocket_handler,
+            .user_ctx = NULL,
+            .is_websocket = true
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &websocket_uri);
+
+        // Start WebSocket streaming task
+        g_network_manager.websocket_running = true;
+        BaseType_t ret = xTaskCreate(websocket_streaming_task, "websocket_stream", 4096, NULL, 4, &g_network_manager.websocket_task);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create WebSocket streaming task");
+            g_network_manager.websocket_running = false;
+        } else {
+            ESP_LOGI(TAG, "WebSocket streaming task started");
+        }
+
         g_network_manager.http_server_running = true;
-        ESP_LOGI(TAG, "HTTP server started successfully");
+        ESP_LOGI(TAG, "HTTP server started successfully with WebSocket support");
         return ESP_OK;
     }
 
