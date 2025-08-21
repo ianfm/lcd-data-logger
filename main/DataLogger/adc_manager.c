@@ -205,8 +205,8 @@ esp_err_t adc_manager_start(void) {
     // Set running flag BEFORE creating task to avoid race condition
     g_adc_manager.running = true;
 
-    // Create sampling task with low priority - web server and network need higher priority
-    BaseType_t ret = xTaskCreate(adc_sampling_task, "adc_sampling", 4096, NULL, 2, &g_adc_manager.sampling_task);
+    // Create sampling task on core 0, separate from HTTP server on core 1
+    BaseType_t ret = xTaskCreatePinnedToCore(adc_sampling_task, "adc_sampling", 4096, NULL, 2, &g_adc_manager.sampling_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create ADC sampling task");
         g_adc_manager.running = false;  // Reset on failure

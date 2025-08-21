@@ -428,60 +428,80 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// WebSocket streaming task
+// WebSocket streaming task - batch both channels together
 static void websocket_streaming_task(void* pvParameters) {
     ESP_LOGI(TAG, "WebSocket streaming task started");
 
-    adc_data_packet_t adc_packet;
+    adc_data_packet_t adc_packets[2]; // Buffer for both channels
+    bool channel_data[2] = {false, false}; // Track which channels we have data for
 
     while (g_network_manager.websocket_running) {
-        // Get ADC data from queue
-        if (adc_manager_get_data(&adc_packet, 50) == ESP_OK) {
-            // Create JSON message
-            cJSON *json = cJSON_CreateObject();
-            cJSON *type = cJSON_CreateString("data");
-            cJSON *timestamp = cJSON_CreateNumber(adc_packet.timestamp_us);
-            cJSON *channel = cJSON_CreateNumber(adc_packet.channel);
-            cJSON *voltage = cJSON_CreateNumber(adc_packet.filtered_voltage);
-            cJSON *raw = cJSON_CreateNumber(adc_packet.raw_value);
-            cJSON *sequence = cJSON_CreateNumber(adc_packet.sequence);
+        // Clear channel data flags
+        channel_data[0] = false;
+        channel_data[1] = false;
 
-            cJSON_AddItemToObject(json, "type", type);
-            cJSON_AddItemToObject(json, "timestamp", timestamp);
-            cJSON_AddItemToObject(json, "channel", channel);
-            cJSON_AddItemToObject(json, "voltage", voltage);
-            cJSON_AddItemToObject(json, "raw", raw);
-            cJSON_AddItemToObject(json, "sequence", sequence);
-
-            char *json_string = cJSON_Print(json);
-
-            // Send to all active WebSocket clients
-            for (int i = 0; i < MAX_WEBSOCKET_CLIENTS; i++) {
-                if (g_network_manager.websocket_clients[i].active) {
-                    httpd_ws_frame_t ws_pkt;
-                    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
-                    ws_pkt.payload = (uint8_t*)json_string;
-                    ws_pkt.len = strlen(json_string);
-                    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
-
-                    esp_err_t ret = httpd_ws_send_frame_async(
-                        g_network_manager.websocket_clients[i].server,
-                        g_network_manager.websocket_clients[i].fd,
-                        &ws_pkt);
-
-                    if (ret != ESP_OK) {
-                        ESP_LOGW(TAG, "WebSocket client %d disconnected", i);
-                        g_network_manager.websocket_clients[i].active = false;
-                    }
+        // Try to get data for both channels
+        adc_data_packet_t packet;
+        int attempts = 0;
+        while (attempts < 10 && (!channel_data[0] || !channel_data[1])) {
+            if (adc_manager_get_data(&packet, 5) == ESP_OK) {
+                if (packet.channel < 2) {
+                    adc_packets[packet.channel] = packet;
+                    channel_data[packet.channel] = true;
                 }
             }
-
-            free(json_string);
-            cJSON_Delete(json);
+            attempts++;
         }
 
-        // Small delay to prevent overwhelming clients
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // Send data for any channels we have
+        for (int ch = 0; ch < 2; ch++) {
+            if (channel_data[ch]) {
+                // Create JSON message for this channel
+                cJSON *json = cJSON_CreateObject();
+                cJSON *type = cJSON_CreateString("data");
+                cJSON *timestamp = cJSON_CreateNumber(adc_packets[ch].timestamp_us);
+                cJSON *channel = cJSON_CreateNumber(adc_packets[ch].channel);
+                cJSON *voltage = cJSON_CreateNumber(adc_packets[ch].filtered_voltage);
+                cJSON *raw = cJSON_CreateNumber(adc_packets[ch].raw_value);
+                cJSON *sequence = cJSON_CreateNumber(adc_packets[ch].sequence);
+
+                cJSON_AddItemToObject(json, "type", type);
+                cJSON_AddItemToObject(json, "timestamp", timestamp);
+                cJSON_AddItemToObject(json, "channel", channel);
+                cJSON_AddItemToObject(json, "voltage", voltage);
+                cJSON_AddItemToObject(json, "raw", raw);
+                cJSON_AddItemToObject(json, "sequence", sequence);
+
+                char *json_string = cJSON_Print(json);
+
+                // Send to all active WebSocket clients
+                for (int i = 0; i < MAX_WEBSOCKET_CLIENTS; i++) {
+                    if (g_network_manager.websocket_clients[i].active) {
+                        httpd_ws_frame_t ws_pkt;
+                        memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+                        ws_pkt.payload = (uint8_t*)json_string;
+                        ws_pkt.len = strlen(json_string);
+                        ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+
+                        esp_err_t ret = httpd_ws_send_frame_async(
+                            g_network_manager.websocket_clients[i].server,
+                            g_network_manager.websocket_clients[i].fd,
+                            &ws_pkt);
+
+                        if (ret != ESP_OK) {
+                            ESP_LOGW(TAG, "WebSocket client %d disconnected", i);
+                            g_network_manager.websocket_clients[i].active = false;
+                        }
+                    }
+                }
+
+                free(json_string);
+                cJSON_Delete(json);
+            }
+        }
+
+        // Delay between batches
+        vTaskDelay(pdMS_TO_TICKS(50)); // Send batches every 50ms
     }
 
     ESP_LOGI(TAG, "WebSocket streaming task stopped");
@@ -702,9 +722,9 @@ esp_err_t network_manager_start_http_server(void) {
         };
         httpd_register_uri_handler(g_network_manager.http_server, &websocket_uri);
 
-        // Start WebSocket streaming task
+        // Start WebSocket streaming task on core 0 (separate from main app on core 1)
         g_network_manager.websocket_running = true;
-        BaseType_t ret = xTaskCreate(websocket_streaming_task, "websocket_stream", 4096, NULL, 4, &g_network_manager.websocket_task);
+        BaseType_t ret = xTaskCreatePinnedToCore(websocket_streaming_task, "websocket_stream", 4096, NULL, 4, &g_network_manager.websocket_task, 0);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create WebSocket streaming task");
             g_network_manager.websocket_running = false;

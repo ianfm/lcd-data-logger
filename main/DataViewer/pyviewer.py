@@ -62,9 +62,11 @@ class ESP32DataLogger:
 # Real-time plotting with WebSocket
 logger = ESP32DataLogger()
 
-# Data storage for plotting
-timestamps = []
-adc_data = {0: [], 1: []}  # Channel 0 and 1 data
+# Data storage for plotting - separate timestamps for each channel
+adc_data = {
+    0: {'timestamps': [], 'voltages': []},
+    1: {'timestamps': [], 'voltages': []}
+}
 
 plt.ion()  # Interactive mode
 fig, ax = plt.subplots()
@@ -77,6 +79,10 @@ if logger.start_websocket():
     print("Using WebSocket for real-time data")
     start_time = time.time()
 
+    last_plot_time = time.time()
+    plot_interval = 0.1  # Update plot every 100ms
+    time_window = 10.0   # Show last 10 seconds of data
+
     while True:
         try:
             # Get data from WebSocket queue (non-blocking)
@@ -86,35 +92,40 @@ if logger.start_websocket():
             channel = data['channel']
             voltage = data['voltage']
 
-            # Store data
-            timestamps.append(current_time)
+            # Store data per channel
             if channel in adc_data:
-                adc_data[channel].append(voltage)
+                adc_data[channel]['timestamps'].append(current_time)
+                adc_data[channel]['voltages'].append(voltage)
 
-            # Keep only last 200 points
-            if len(timestamps) > 200:
-                timestamps.pop(0)
-                for ch in adc_data:
-                    if len(adc_data[ch]) > 200:
-                        adc_data[ch].pop(0)
+                # Keep only data within time window
+                cutoff_time = current_time - time_window
+                while (len(adc_data[channel]['timestamps']) > 0 and
+                       adc_data[channel]['timestamps'][0] < cutoff_time):
+                    adc_data[channel]['timestamps'].pop(0)
+                    adc_data[channel]['voltages'].pop(0)
 
-            # Update plot every 10 samples to reduce CPU usage
-            if len(timestamps) % 10 == 0:
+            # Update plot at regular intervals
+            if time.time() - last_plot_time > plot_interval:
                 ax.clear()
                 ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
                 ax.set_xlabel('Time (s)')
                 ax.set_ylabel('Voltage (V)')
 
-                # Plot each channel that has data
-                for channel, values in adc_data.items():
-                    if len(values) > 0:
-                        # Align timestamps with data length
-                        plot_timestamps = timestamps[-len(values):]
-                        ax.plot(plot_timestamps, values, label=f'ADC{channel}', marker='o', markersize=2)
+                # Plot each channel as line plot
+                for channel_num, channel_data in adc_data.items():
+                    if len(channel_data['voltages']) > 0:
+                        ax.plot(channel_data['timestamps'], channel_data['voltages'],
+                               label=f'ADC{channel_num}', marker='o', markersize=1, linewidth=1)
+
+                # Set consistent axis limits
+                current_time_now = time.time() - start_time
+                ax.set_xlim(current_time_now - time_window, current_time_now)
+                ax.set_ylim(0, 1.0)  # Assuming 0-1V range for ADC
 
                 ax.legend()
                 ax.grid(True, alpha=0.3)
-                plt.pause(0.01)  # Much faster updates
+                plt.pause(0.01)
+                last_plot_time = time.time()
 
         except queue.Empty:
             # No new data, just refresh the plot
@@ -126,26 +137,29 @@ if logger.start_websocket():
 
 else:
     print("WebSocket failed, falling back to HTTP polling")
-    # Fallback to original HTTP method
+    # Fallback to original HTTP method - reset data structure for HTTP
+    http_timestamps = []
+    http_adc_data = {0: [], 1: []}
+
     while True:
         try:
             data = logger.get_latest_data()
             current_time = time.time()
 
-            timestamps.append(current_time)
-            adc_data[0].append(data['adc']['channel0']['voltage'])
-            adc_data[1].append(data['adc']['channel1']['voltage'])
+            http_timestamps.append(current_time)
+            http_adc_data[0].append(data['adc']['channel0']['voltage'])
+            http_adc_data[1].append(data['adc']['channel1']['voltage'])
 
             # Keep only last 100 points
-            if len(timestamps) > 100:
-                timestamps.pop(0)
-                adc_data[0].pop(0)
-                adc_data[1].pop(0)
+            if len(http_timestamps) > 100:
+                http_timestamps.pop(0)
+                http_adc_data[0].pop(0)
+                http_adc_data[1].pop(0)
 
             ax.clear()
             ax.set_title('ESP32 ADC Data (HTTP Polling)')
-            ax.plot(timestamps, adc_data[0], label='ADC0')
-            ax.plot(timestamps, adc_data[1], label='ADC1')
+            ax.plot(http_timestamps, http_adc_data[0], label='ADC0')
+            ax.plot(http_timestamps, http_adc_data[1], label='ADC1')
             ax.legend()
             plt.pause(0.1)
 
