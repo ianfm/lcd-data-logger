@@ -56,6 +56,7 @@ esp_err_t hal_adc_init(uint8_t channel);
 esp_err_t hal_adc_deinit(uint8_t channel);
 esp_err_t hal_adc_read_raw(uint8_t channel, int* raw_value);
 esp_err_t hal_adc_read_voltage(uint8_t channel, float* voltage);
+esp_err_t hal_adc_raw_to_voltage(uint8_t channel, int raw_value, float* voltage);
 bool hal_adc_is_initialized(uint8_t channel);
 bool hal_adc_is_calibrated(uint8_t channel);
 

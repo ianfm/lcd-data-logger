@@ -142,20 +142,46 @@ static esp_err_t data_latest_handler(httpd_req_t *req) {
     }
     cJSON_AddItemToObject(json, "uart", uart_data);
 
-    // Get ADC data
+    // Get ADC data from queue (latest samples)
     cJSON *adc_data = cJSON_CreateObject();
     for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
         if (adc_manager_is_channel_enabled(i)) {
-            float voltage;
-            if (adc_manager_get_instant_reading(i, &voltage) == ESP_OK) {
-                char channel_name[16];
-                snprintf(channel_name, sizeof(channel_name), "channel%d", i);
+            // Try to get latest queued data first
+            adc_data_packet_t packet;
+            bool got_queued_data = false;
 
-                cJSON *channel_data = cJSON_CreateObject();
-                cJSON *voltage_val = cJSON_CreateNumber(voltage);
-                cJSON_AddItemToObject(channel_data, "voltage", voltage_val);
-                cJSON_AddItemToObject(adc_data, channel_name, channel_data);
+            // Check if there's recent data in the queue for this channel
+            size_t available = adc_manager_get_available_data();
+            if (available > 0) {
+                // Try to get the most recent sample for this channel
+                if (adc_manager_get_data(&packet, 10) == ESP_OK && packet.channel == i) {
+                    got_queued_data = true;
+                }
             }
+
+            char channel_name[16];
+            snprintf(channel_name, sizeof(channel_name), "channel%d", i);
+            cJSON *channel_data = cJSON_CreateObject();
+
+            if (got_queued_data) {
+                // Use queued data (from continuous sampling)
+                cJSON *voltage_val = cJSON_CreateNumber(packet.filtered_voltage);
+                cJSON *raw_val = cJSON_CreateNumber(packet.raw_value);
+                cJSON *seq_val = cJSON_CreateNumber(packet.sequence);
+                cJSON_AddItemToObject(channel_data, "voltage", voltage_val);
+                cJSON_AddItemToObject(channel_data, "raw", raw_val);
+                cJSON_AddItemToObject(channel_data, "sequence", seq_val);
+            } else {
+                // Fallback to instant reading if no queued data
+                float voltage;
+                if (adc_manager_get_instant_reading(i, &voltage) == ESP_OK) {
+                    cJSON *voltage_val = cJSON_CreateNumber(voltage);
+                    cJSON_AddItemToObject(channel_data, "voltage", voltage_val);
+                    cJSON_AddItemToObject(channel_data, "source", cJSON_CreateString("instant"));
+                }
+            }
+
+            cJSON_AddItemToObject(adc_data, channel_name, channel_data);
         }
     }
     cJSON_AddItemToObject(json, "adc", adc_data);

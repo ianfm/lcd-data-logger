@@ -342,6 +342,30 @@ bool hal_uart_is_initialized(uint8_t port) {
     return g_hal_system.uart_ports[port].initialized;
 }
 
+esp_err_t hal_adc_raw_to_voltage(uint8_t channel, int raw_value, float* voltage) {
+    if (!HAL_VALIDATE_ADC_CHANNEL(channel) || !voltage) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    hal_adc_t* adc = &g_hal_system.adc_channels[channel];
+    if (!adc->initialized) {
+        return HAL_ERR_NOT_INITIALIZED;
+    }
+
+    if (adc->calibrated) {
+        int voltage_mv;
+        esp_err_t ret = adc_cali_raw_to_voltage(adc->cali_handle, raw_value, &voltage_mv);
+        if (ret == ESP_OK) {
+            *voltage = voltage_mv / 1000.0f;  // Convert mV to V
+        }
+        return ret;
+    } else {
+        // Simple linear conversion without calibration
+        *voltage = (raw_value / 4095.0f) * 3.3f;  // 12-bit ADC, 3.3V reference
+        return ESP_OK;
+    }
+}
+
 bool hal_adc_is_initialized(uint8_t channel) {
     if (!HAL_VALIDATE_ADC_CHANNEL(channel)) {
         return false;

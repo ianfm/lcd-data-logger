@@ -39,10 +39,23 @@ static float apply_moving_average(adc_channel_context_t* channel, float new_valu
 
 // ADC Sampling Task
 static void adc_sampling_task(void* pvParameters) {
-    ESP_LOGI(TAG, "ADC sampling task started");
+    ESP_LOGI(TAG, "ADC sampling task started, running=%d", g_adc_manager.running);
 
     system_config_t* config = config_get_instance();
     TickType_t last_wake_time = xTaskGetTickCount();
+
+    // Debug: Check enabled channels at startup
+    int enabled_count = 0;
+    for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+        if (config->adc_config[i].enabled) {
+            enabled_count++;
+            ESP_LOGI(TAG, "ADC%d enabled at %d Hz", i, config->adc_config[i].sample_rate_hz);
+        }
+    }
+    ESP_LOGI(TAG, "Found %d enabled ADC channels", enabled_count);
+
+    // Don't mess with watchdog - just let it work normally
+    ESP_LOGI(TAG, "ADC sampling task starting normally");
 
     while (g_adc_manager.running) {
         uint64_t timestamp = esp_timer_get_time();
@@ -55,14 +68,14 @@ static void adc_sampling_task(void* pvParameters) {
 
             adc_channel_context_t* channel = &g_adc_manager.channels[i];
 
-            // Read raw ADC value
+            // Read raw ADC value once
             int raw_value;
             esp_err_t ret = hal_adc_read_raw(i, &raw_value);
 
             if (ret == ESP_OK) {
-                // Convert to voltage
+                // Convert raw to voltage using the same raw reading
                 float voltage;
-                ret = hal_adc_read_voltage(i, &voltage);
+                ret = hal_adc_raw_to_voltage(i, raw_value, &voltage);
 
                 if (ret == ESP_OK) {
                     // Apply filtering
@@ -78,10 +91,13 @@ static void adc_sampling_task(void* pvParameters) {
                         .sequence = channel->sequence_number++
                     };
 
-                    // Send to queue
+                    // Send to queue (non-blocking) - drop samples if queue full to prevent blocking
                     if (xQueueSend(g_adc_manager.data_queue, &packet, 0) != pdTRUE) {
                         channel->stats.dropped_samples++;
-                        ESP_LOGW(TAG, "ADC%d queue full, dropping sample", i);
+                        // Only log every 100th dropped sample to avoid spam
+                        if (channel->stats.dropped_samples % 100 == 1) {
+                            ESP_LOGW(TAG, "ADC%d queue full, dropped %lu samples", i, channel->stats.dropped_samples);
+                        }
                     } else {
                         channel->stats.total_samples++;
                         channel->last_sample_time = timestamp;
@@ -98,18 +114,34 @@ static void adc_sampling_task(void* pvParameters) {
                         channel->stats.avg_voltage =
                             (channel->stats.avg_voltage * (channel->stats.total_samples - 1) + voltage) /
                             channel->stats.total_samples;
+
+                        // Console logging for continuous stream (reduced frequency)
+                        if (channel->sequence_number % 50 == 1) {  // Log every 50th sample
+                            ESP_LOGI(TAG, "ADC%d: %.3fV (raw: %d, seq: %lu)",
+                                    i, voltage, raw_value, channel->sequence_number - 1);
+                        }
                     }
                 } else {
                     channel->stats.error_count++;
+                    ESP_LOGE(TAG, "ADC%d voltage read failed: %s", i, esp_err_to_name(ret));
                 }
             } else {
                 channel->stats.error_count++;
+                ESP_LOGE(TAG, "ADC%d raw read failed: %s", i, esp_err_to_name(ret));
             }
         }
 
-        // Calculate delay for desired sample rate
+        // Yield to other tasks immediately after processing all channels
+        taskYIELD();
+
+        // Calculate delay for desired sample rate and yield to other tasks
         uint16_t sample_rate = config->adc_config[0].sample_rate_hz;  // Use first channel's rate
         TickType_t delay_ticks = pdMS_TO_TICKS(1000 / sample_rate);
+
+        // Ensure minimum delay to prevent watchdog timeout
+        if (delay_ticks < pdMS_TO_TICKS(10)) {
+            delay_ticks = pdMS_TO_TICKS(10);  // Minimum 10ms delay
+        }
 
         vTaskDelayUntil(&last_wake_time, delay_ticks);
     }
@@ -170,14 +202,17 @@ esp_err_t adc_manager_start(void) {
 
     ESP_LOGI(TAG, "Starting ADC Manager");
 
-    // Create sampling task
-    BaseType_t ret = xTaskCreate(adc_sampling_task, "adc_sampling", 4096, NULL, 6, &g_adc_manager.sampling_task);
+    // Set running flag BEFORE creating task to avoid race condition
+    g_adc_manager.running = true;
+
+    // Create sampling task with low priority - web server and network need higher priority
+    BaseType_t ret = xTaskCreate(adc_sampling_task, "adc_sampling", 4096, NULL, 2, &g_adc_manager.sampling_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create ADC sampling task");
+        g_adc_manager.running = false;  // Reset on failure
         return ESP_ERR_NO_MEM;
     }
 
-    g_adc_manager.running = true;
     ESP_LOGI(TAG, "ADC Manager started");
 
     return ESP_OK;
@@ -185,10 +220,11 @@ esp_err_t adc_manager_start(void) {
 
 esp_err_t adc_manager_stop(void) {
     if (!g_adc_manager.running) {
+        ESP_LOGW(TAG, "ADC Manager stop called but already stopped");
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Stopping ADC Manager");
+    ESP_LOGW(TAG, "ADC Manager being stopped externally!");
 
     g_adc_manager.running = false;
 
