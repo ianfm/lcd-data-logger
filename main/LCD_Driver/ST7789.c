@@ -51,9 +51,9 @@ void LCD_Init(void)
 
     ESP_LOGI(TAG_LCD, "Turn on LCD backlight");
     // gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
-    
+
     BK_Init();                                                                                          // Initialize the backlight
-    BK_Light(75);
+    BK_Light(20);  // REDUCED from 75% to 20% to reduce heat and power consumption
 
 }
 

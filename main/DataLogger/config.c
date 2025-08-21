@@ -112,7 +112,7 @@ esp_err_t config_load_defaults(system_config_t* config) {
     
     // Display Configuration
     config->display_config.enabled = true;
-    config->display_config.brightness = 50;
+    config->display_config.brightness = 20;  // REDUCED from 50% to 20% for lower power/heat
     config->display_config.refresh_rate_ms = CONFIG_LCD_REFRESH_RATE_MS;
     config->display_config.auto_sleep_sec = CONFIG_LCD_AUTO_SLEEP_SEC;
     config->display_config.display_mode = 0; // Default display mode

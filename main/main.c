@@ -79,10 +79,10 @@ static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "Initializing LVGL...");
     LVGL_Init();
 
-    // Show ADC display immediately after LVGL is ready - don't wait for data logger
-    ESP_LOGI(TAG, "Starting ADC display early for immediate feedback...");
-    adc_display_init();
-    ESP_LOGI(TAG, "ADC display started - user can see screen immediately");
+    // Show boot status display immediately after LVGL is ready
+    ESP_LOGI(TAG, "Starting boot status display for immediate feedback...");
+    boot_status_display_init();
+    ESP_LOGI(TAG, "Boot status display started - user can see screen immediately");
 
     ESP_LOGI(TAG, "Display initialization complete");
 
@@ -104,34 +104,73 @@ void app_main(void)
         esp_restart();
     }
 
+    // Update boot status - Step 2
+    boot_status_update("Step 2/8: Data Logger Init");
+
     // Initialize data logger (now with unified WiFi management)
     ESP_LOGI(TAG, "Initializing data logger with integrated network management...");
     ret = data_logger_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
+        boot_status_update("ERROR: Data Logger Init Failed");
         // Continue with basic functionality
     }
+
+    // Update boot status - Step 3
+    boot_status_update("Step 3/8: Starting WiFi & Network");
+    boot_wifi_status_update(); // Show initial WiFi status
+    boot_temp_status_update(); // Show initial temperature
 
     // Start data logger (includes WiFi scan + connection + HTTP server)
     ret = data_logger_start();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));
+        boot_status_update("ERROR: Network Start Failed");
     }
+
+    // Update WiFi and temperature status after network start
+    boot_wifi_status_update();
+    boot_temp_status_update();
+
+    // Update boot status - Step 4
+    boot_status_update("Step 4/8: Running Self Test");
 
     // Run self test (ENABLED FOR TESTING)
     ret = data_logger_run_self_test();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Self test completed with warnings");
+        boot_status_update("WARNING: Self Test Issues");
     }
+
+    // Update boot status - Step 5
+    boot_status_update("Step 5/8: Full Test Suite");
 
     // Run full test suite (ENABLED FOR TESTING)
     ret = data_logger_run_full_test_suite();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Full test suite completed with failures");
+        boot_status_update("WARNING: Test Suite Issues");
     }
+
+    // Update boot status - Step 6
+    boot_status_update("Step 6/8: System Status Check");
 
     // Print initial status
     data_logger_print_status();
+
+    // Update boot status - Step 7
+    boot_status_update("Step 7/8: Starting ADC Display");
+
+    // Now switch to ADC display
+    adc_display_init();
+
+    // Update boot status - Step 8 (Final)
+    boot_status_update("Step 8/8: System Ready!");
+    boot_wifi_status_update(); // Final WiFi status update
+    boot_temp_status_update(); // Final temperature update
+
+    // Brief pause to show "System Ready!" message
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     ESP_LOGI(TAG, "Data logger running, entering main loop");
 
