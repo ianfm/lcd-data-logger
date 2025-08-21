@@ -1,4 +1,5 @@
 import requests
+import matplotlib
 import matplotlib.pyplot as plt
 import time
 import json
@@ -6,10 +7,29 @@ import threading
 import queue
 from websocket import WebSocketApp
 
+# Fix matplotlib backend issues for Python 3.12.3 and interactive plotting
+def setup_matplotlib_backend():
+    """Setup matplotlib backend with fallback options for compatibility"""
+    backends_to_try = ['TkAgg', 'Qt5Agg', 'Qt4Agg', 'Agg']
+
+    for backend in backends_to_try:
+        try:
+            matplotlib.use(backend)
+            print(f"Using matplotlib backend: {backend}")
+            return backend != 'Agg'  # Return True if interactive, False if non-interactive
+        except ImportError:
+            continue
+
+    print("Warning: Could not set any matplotlib backend, using default")
+    return True  # Assume interactive
+
+# Setup backend early
+INTERACTIVE_MODE = setup_matplotlib_backend()
+
 class ESP32DataLogger:
     def __init__(self, host='192.168.86.100', port=80):
         self.base_url = f'http://{host}:{port}'
-        self.ws_url = f'ws://{host}:{port}/ws'
+        self.ws_url = f'ws://{host}:{port}/ws'  # WebSocket runs on same HTTP server port
         self.data_queue = queue.Queue()
         self.ws = None
         self.running = False
@@ -68,11 +88,62 @@ adc_data = {
     1: {'timestamps': [], 'voltages': []}
 }
 
-plt.ion()  # Interactive mode
-fig, ax = plt.subplots()
-ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
-ax.set_xlabel('Time (s)')
-ax.set_ylabel('Voltage (V)')
+# Setup plotting with backend compatibility
+def safe_plot_setup():
+    """Setup matplotlib plotting with error handling"""
+    try:
+        if INTERACTIVE_MODE:
+            plt.ion()  # Interactive mode
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Voltage (V)')
+        return fig, ax, True
+    except Exception as e:
+        print(f"Plot setup failed: {e}")
+        return None, None, False
+
+def safe_plot_update(ax, adc_data, start_time, time_window):
+    """Safely update plot with error handling"""
+    try:
+        ax.clear()
+        ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Voltage (V)')
+
+        # Plot each channel as line plot
+        for channel_num, channel_data in adc_data.items():
+            if len(channel_data['voltages']) > 0:
+                ax.plot(channel_data['timestamps'], channel_data['voltages'],
+                       label=f'ADC{channel_num}', marker='o', markersize=1, linewidth=1)
+
+        # Set consistent axis limits
+        current_time_now = time.time() - start_time
+        ax.set_xlim(current_time_now - time_window, current_time_now)
+        ax.set_ylim(0, 3.3)  # 0-3.3V range for ESP32 ADC
+
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        if INTERACTIVE_MODE:
+            plt.draw()
+            plt.pause(0.01)
+        else:
+            plt.savefig('adc_realtime.png', dpi=100, bbox_inches='tight')
+            print("Plot saved to adc_realtime.png")
+
+        return True
+    except Exception as e:
+        print(f"Plot update failed: {e}")
+        return False
+
+# Setup plotting
+fig, ax, plot_success = safe_plot_setup()
+if not plot_success:
+    print("ERROR: Could not setup plotting. Exiting.")
+    exit(1)
+
+print(f"Plotting mode: {'Interactive' if INTERACTIVE_MODE else 'File output'}")
 
 # Try to connect via WebSocket
 if logger.start_websocket():
@@ -106,30 +177,20 @@ if logger.start_websocket():
 
             # Update plot at regular intervals
             if time.time() - last_plot_time > plot_interval:
-                ax.clear()
-                ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
-                ax.set_xlabel('Time (s)')
-                ax.set_ylabel('Voltage (V)')
-
-                # Plot each channel as line plot
-                for channel_num, channel_data in adc_data.items():
-                    if len(channel_data['voltages']) > 0:
-                        ax.plot(channel_data['timestamps'], channel_data['voltages'],
-                               label=f'ADC{channel_num}', marker='o', markersize=1, linewidth=1)
-
-                # Set consistent axis limits
-                current_time_now = time.time() - start_time
-                ax.set_xlim(current_time_now - time_window, current_time_now)
-                ax.set_ylim(0, 1.0)  # Assuming 0-1V range for ADC
-
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                plt.pause(0.01)
-                last_plot_time = time.time()
+                if safe_plot_update(ax, adc_data, start_time, time_window):
+                    last_plot_time = time.time()
+                else:
+                    print("Plot update failed, continuing...")
 
         except queue.Empty:
             # No new data, just refresh the plot
-            plt.pause(0.01)
+            try:
+                if INTERACTIVE_MODE:
+                    plt.pause(0.01)
+                else:
+                    time.sleep(0.01)
+            except:
+                time.sleep(0.01)  # Fallback
             continue
         except KeyboardInterrupt:
             print("Stopping...")
@@ -156,12 +217,24 @@ else:
                 http_adc_data[0].pop(0)
                 http_adc_data[1].pop(0)
 
-            ax.clear()
-            ax.set_title('ESP32 ADC Data (HTTP Polling)')
-            ax.plot(http_timestamps, http_adc_data[0], label='ADC0')
-            ax.plot(http_timestamps, http_adc_data[1], label='ADC1')
-            ax.legend()
-            plt.pause(0.1)
+            try:
+                ax.clear()
+                ax.set_title('ESP32 ADC Data (HTTP Polling)')
+                ax.plot(http_timestamps, http_adc_data[0], label='ADC0')
+                ax.plot(http_timestamps, http_adc_data[1], label='ADC1')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+
+                if INTERACTIVE_MODE:
+                    plt.draw()
+                    plt.pause(0.1)
+                else:
+                    plt.savefig('adc_http_polling.png', dpi=100, bbox_inches='tight')
+                    print("HTTP plot saved to adc_http_polling.png")
+                    time.sleep(0.5)  # Slower updates for file mode
+            except Exception as e:
+                print(f"HTTP plot update failed: {e}")
+                time.sleep(0.1)
 
         except KeyboardInterrupt:
             print("Stopping...")

@@ -11,3 +11,5 @@
 
 
 void Lvgl_Example1(void);
+void simple_ai_display(void);
+void adc_display_init(void);

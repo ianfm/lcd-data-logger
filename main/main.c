@@ -79,6 +79,11 @@ static esp_err_t system_init(void) {
     ESP_LOGI(TAG, "Initializing LVGL...");
     LVGL_Init();
 
+    // Show ADC display immediately after LVGL is ready - don't wait for data logger
+    ESP_LOGI(TAG, "Starting ADC display early for immediate feedback...");
+    adc_display_init();
+    ESP_LOGI(TAG, "ADC display started - user can see screen immediately");
+
     ESP_LOGI(TAG, "Display initialization complete");
 
     // WiFi initialization now handled by DataLogger network_manager
@@ -127,11 +132,6 @@ void app_main(void)
 
     // Print initial status
     data_logger_print_status();
-
-    // Show initial display (EXACTLY like original demo)
-    ESP_LOGI(TAG, "Starting original LVGL demo...");
-    Lvgl_Example1();
-    ESP_LOGI(TAG, "Original LVGL demo started");
 
     ESP_LOGI(TAG, "Data logger running, entering main loop");
 

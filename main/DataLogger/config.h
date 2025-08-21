@@ -20,8 +20,8 @@ extern "C" {
 #define CONFIG_UART2_DEFAULT_BAUD       115200
 #define CONFIG_UART3_DEFAULT_BAUD       38400
 
-// Default ADC Configuration
-#define CONFIG_ADC_DEFAULT_SAMPLE_RATE  100  // Hz
+// Default ADC Configuration - MATCHED TO WEBSOCKET RATE
+#define CONFIG_ADC_DEFAULT_SAMPLE_RATE  20   // Hz - matches WebSocket streaming rate
 #define CONFIG_ADC_VOLTAGE_RANGE        4.0f // 0-4V
 #define CONFIG_ADC_FILTER_ALPHA         0.1f // Moving average filter
 

@@ -1,4 +1,6 @@
 #include "LVGL_Example.h"
+#include "adc_manager.h"
+#include "config.h"
 
 /**********************
  *      TYPEDEFS
@@ -16,10 +18,22 @@ static void Onboard_create(lv_obj_t * parent);
 
 static void ta_event_cb(lv_event_t * e);
 void example1_increase_lvgl_tick(lv_timer_t * t);
+
+// New ADC display functions
+void simple_ai_display(void);
+void adc_display_init(void);
+void adc_display_update_timer(lv_timer_t * timer);
+
 /**********************
  *  STATIC VARIABLES
  **********************/
 static disp_size_t disp_size;
+
+// ADC Display variables
+static lv_obj_t * adc_title_label = NULL;
+static lv_obj_t * adc_value_labels[CONFIG_ADC_CHANNEL_COUNT] = {NULL};
+static lv_obj_t * adc_status_label = NULL;
+static lv_timer_t * adc_update_timer = NULL;
 
 static lv_obj_t * tv;
 lv_style_t style_text_muted;
@@ -237,6 +251,126 @@ void example1_increase_lvgl_tick(lv_timer_t * t)
 
 static void ta_event_cb(lv_event_t * e)
 {
+}
+
+/**
+ * Simple display function to show "AI is dumb" text
+ * Based on LVGL get_started example pattern - using LVGL v8.3 API
+ */
+void simple_ai_display(void)
+{
+    // Clear the screen and set background color to dark blue
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x003a57), LV_PART_MAIN);
+
+    // Create a white label with the text "AI is dumb"
+    lv_obj_t * label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, "AI is dumb");
+
+    // Set text color to white
+    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), LV_PART_MAIN);
+
+    // Center the label on the screen
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    // Optional: Set a larger font if available
+    // lv_obj_set_style_text_font(label, &lv_font_montserrat_24, LV_PART_MAIN);
+}
+
+/**
+ * Initialize ADC display with real-time voltage readings
+ * Shows ADC channels and updates every second
+ */
+void adc_display_init(void)
+{
+    // Clear the screen and set background color to dark blue
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x003a57), LV_PART_MAIN);
+
+    // Create title label
+    adc_title_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(adc_title_label, "ADC Readings");
+    lv_obj_set_style_text_color(adc_title_label, lv_color_hex(0xffffff), LV_PART_MAIN);
+    lv_obj_align(adc_title_label, LV_ALIGN_TOP_MID, 0, 10);
+
+    // Create labels for each ADC channel
+    for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+        if (adc_manager_is_channel_enabled(i)) {
+            adc_value_labels[i] = lv_label_create(lv_scr_act());
+            lv_label_set_text(adc_value_labels[i], "ADC0: -.---V");
+            lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0x00ff00), LV_PART_MAIN);
+            lv_obj_align(adc_value_labels[i], LV_ALIGN_TOP_LEFT, 10, 40 + (i * 25));
+        }
+    }
+
+    // Create status label
+    adc_status_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(adc_status_label, "Initializing...");
+    lv_obj_set_style_text_color(adc_status_label, lv_color_hex(0xffff00), LV_PART_MAIN);
+    lv_obj_align(adc_status_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    // Create timer to update display every 1000ms (1 second)
+    adc_update_timer = lv_timer_create(adc_display_update_timer, 1000, NULL);
+
+    // Force initial update
+    adc_display_update_timer(adc_update_timer);
+}
+
+/**
+ * Timer callback to update ADC display values
+ * Called every second to refresh voltage readings
+ */
+void adc_display_update_timer(lv_timer_t * timer)
+{
+    static uint32_t update_count = 0;
+    char buffer[64];
+    bool any_channel_active = false;
+
+    update_count++;
+
+    // Update each enabled ADC channel
+    for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+        if (adc_manager_is_channel_enabled(i) && adc_value_labels[i] != NULL) {
+            any_channel_active = true;
+            float voltage = 0.0f;
+
+            // Get instant reading from ADC manager
+            esp_err_t ret = adc_manager_get_instant_reading(i, &voltage);
+
+            if (ret == ESP_OK) {
+                // Format voltage reading
+                snprintf(buffer, sizeof(buffer), "ADC%d: %5.3fV", i, voltage);
+                lv_label_set_text(adc_value_labels[i], buffer);
+
+                // Change color based on voltage level
+                if (voltage > 2.5f) {
+                    lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0xff0000), LV_PART_MAIN); // Red for high
+                } else if (voltage > 1.0f) {
+                    lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0x00ff00), LV_PART_MAIN); // Green for normal
+                } else {
+                    lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0x0080ff), LV_PART_MAIN); // Blue for low
+                }
+            } else {
+                // Show error
+                snprintf(buffer, sizeof(buffer), "ADC%d: ERROR", i);
+                lv_label_set_text(adc_value_labels[i], buffer);
+                lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0xff8000), LV_PART_MAIN); // Orange for error
+            }
+        }
+    }
+
+    // Update status
+    if (any_channel_active) {
+        if (adc_manager_is_running()) {
+            snprintf(buffer, sizeof(buffer), "Running - Updates: %lu", update_count);
+        } else {
+            snprintf(buffer, sizeof(buffer), "ADC Manager Stopped");
+        }
+    } else {
+        snprintf(buffer, sizeof(buffer), "No ADC channels enabled");
+    }
+
+    if (adc_status_label != NULL) {
+        lv_label_set_text(adc_status_label, buffer);
+    }
 }
 
 

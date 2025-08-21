@@ -11,8 +11,8 @@
 extern "C" {
 #endif
 
-// ADC Manager Configuration
-#define ADC_QUEUE_SIZE              100
+// ADC Manager Configuration - OPTIMIZED FOR MATCHED RATES
+#define ADC_QUEUE_SIZE              10     // Smaller queue since rates are matched
 #define ADC_MAX_SAMPLE_RATE         10000  // 10kHz maximum
 #define ADC_MIN_SAMPLE_RATE         1      // 1Hz minimum
 
