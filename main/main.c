@@ -94,23 +94,29 @@ void app_main(void)
 
     // Initialize data logger (DISABLED - WiFi conflict)
     ESP_LOGI(TAG, "Skipping data logger to avoid WiFi conflicts...");
-    // ret = data_logger_init();
-    // if (ret != ESP_OK) {
-    //     ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
-    //     // Continue with basic functionality
-    // }
+    ret = data_logger_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Data logger initialization failed: %s", esp_err_to_name(ret));
+        // Continue with basic functionality
+    }
 
     // Start data logger (DISABLED - WiFi conflict)
-    // ret = data_logger_start();
-    // if (ret != ESP_OK) {
-    //     ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));
-    // }
+    ret = data_logger_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start data logger: %s", esp_err_to_name(ret));
+    }
 
-    // Run self test (DISABLED - WiFi conflict)
-    // ret = data_logger_run_self_test();
-    // if (ret != ESP_OK) {
-    //     ESP_LOGW(TAG, "Self test completed with warnings");
-    // }
+    // Run self test (ENABLED FOR TESTING)
+    ret = data_logger_run_self_test();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Self test completed with warnings");
+    }
+
+    // Run full test suite (ENABLED FOR TESTING)
+    ret = data_logger_run_full_test_suite();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Full test suite completed with failures");
+    }
 
     // Print initial status
     data_logger_print_status();
