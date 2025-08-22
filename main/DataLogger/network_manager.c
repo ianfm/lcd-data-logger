@@ -7,6 +7,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
+// Note: WebSocket server support (esp_http_server_ws.h) is not available in ESP-IDF v5.5
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -289,6 +290,468 @@ static esp_err_t test_handler(httpd_req_t *req) {
 
     g_network_manager.stats.api_requests++;
     return ESP_OK;
+}
+
+// JSON Configuration Parsing Utilities
+static esp_err_t parse_request_body(httpd_req_t *req, char **json_string) {
+    if (!req || !json_string) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Get content length
+    size_t content_len = req->content_len;
+    if (content_len == 0 || content_len > 4096) {  // Limit to 4KB
+        ESP_LOGE(TAG, "Invalid content length: %zu", content_len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Allocate buffer for JSON data
+    *json_string = malloc(content_len + 1);
+    if (!*json_string) {
+        ESP_LOGE(TAG, "Failed to allocate memory for request body");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Read request body
+    size_t received = 0;
+    while (received < content_len) {
+        int ret = httpd_req_recv(req, *json_string + received, content_len - received);
+        if (ret <= 0) {
+            ESP_LOGE(TAG, "Failed to receive request body");
+            free(*json_string);
+            *json_string = NULL;
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+
+    (*json_string)[content_len] = '\0';
+    ESP_LOGI(TAG, "Received JSON: %s", *json_string);
+    return ESP_OK;
+}
+
+static esp_err_t send_json_response(httpd_req_t *req, cJSON *json) {
+    if (!req || !json) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char *json_string = cJSON_Print(json);
+    if (!json_string) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+
+    esp_err_t ret = httpd_resp_send(req, json_string, strlen(json_string));
+
+    free(json_string);
+    return ret;
+}
+
+static esp_err_t send_error_response(httpd_req_t *req, int status_code, const char *error_message) {
+    httpd_resp_set_status(req, status_code == 400 ? "400 Bad Request" :
+                              status_code == 500 ? "500 Internal Server Error" : "400 Bad Request");
+
+    cJSON *json = cJSON_CreateObject();
+    cJSON *error = cJSON_CreateString(error_message);
+    cJSON *success = cJSON_CreateBool(false);
+
+    cJSON_AddItemToObject(json, "success", success);
+    cJSON_AddItemToObject(json, "error", error);
+
+    esp_err_t ret = send_json_response(req, json);
+    cJSON_Delete(json);
+
+    return ret;
+}
+
+// ADC Configuration POST Handler
+static esp_err_t config_adc_post_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "ADC configuration update request");
+
+    char *json_string = NULL;
+    esp_err_t ret = parse_request_body(req, &json_string);
+    if (ret != ESP_OK) {
+        return send_error_response(req, 400, "Failed to parse request body");
+    }
+
+    // Parse JSON
+    cJSON *json = cJSON_Parse(json_string);
+    free(json_string);
+
+    if (!json) {
+        return send_error_response(req, 400, "Invalid JSON format");
+    }
+
+    // Validate and apply ADC configuration
+    bool config_changed = false;
+    bool restart_required = false;
+    cJSON *response = cJSON_CreateObject();
+    cJSON *changes = cJSON_CreateArray();
+
+    // Process channel configurations
+    cJSON *channels = cJSON_GetObjectItem(json, "channels");
+    if (cJSON_IsArray(channels)) {
+        cJSON *channel_item = NULL;
+        cJSON_ArrayForEach(channel_item, channels) {
+            cJSON *channel_num = cJSON_GetObjectItem(channel_item, "channel");
+            cJSON *enabled = cJSON_GetObjectItem(channel_item, "enabled");
+            cJSON *sample_rate = cJSON_GetObjectItem(channel_item, "sample_rate");
+
+            if (!cJSON_IsNumber(channel_num)) {
+                continue;
+            }
+
+            int ch = (int)cJSON_GetNumberValue(channel_num);
+            if (ch < 0 || ch >= CONFIG_ADC_CHANNEL_COUNT) {
+                continue;
+            }
+
+            // Update enabled state
+            if (cJSON_IsBool(enabled)) {
+                bool new_enabled = cJSON_IsTrue(enabled);
+                if (adc_manager_is_channel_enabled(ch) != new_enabled) {
+                    ret = config_update_adc(ch, 0, new_enabled);  // Keep current sample rate
+                    if (ret == ESP_OK) {
+                        config_changed = true;
+                        restart_required = true;
+
+                        cJSON *change = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(change, "channel", ch);
+                        cJSON_AddStringToObject(change, "property", "enabled");
+                        cJSON_AddBoolToObject(change, "value", new_enabled);
+                        cJSON_AddItemToArray(changes, change);
+
+                        ESP_LOGI(TAG, "ADC channel %d enabled: %s", ch, new_enabled ? "true" : "false");
+                    }
+                }
+            }
+
+            // Update sample rate
+            if (cJSON_IsNumber(sample_rate)) {
+                uint16_t new_rate = (uint16_t)cJSON_GetNumberValue(sample_rate);
+                if (new_rate >= 1 && new_rate <= 10000) {  // Validate range
+                    // Get current config to preserve enabled state
+                    bool current_enabled = adc_manager_is_channel_enabled(ch);
+                    ret = config_update_adc(ch, new_rate, current_enabled);
+                    if (ret == ESP_OK) {
+                        config_changed = true;
+                        restart_required = true;
+
+                        cJSON *change = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(change, "channel", ch);
+                        cJSON_AddStringToObject(change, "property", "sample_rate");
+                        cJSON_AddNumberToObject(change, "value", new_rate);
+                        cJSON_AddItemToArray(changes, change);
+
+                        ESP_LOGI(TAG, "ADC channel %d sample rate: %d Hz", ch, new_rate);
+                    }
+                }
+            }
+        }
+    }
+
+    // Build response
+    cJSON_AddBoolToObject(response, "success", config_changed);
+    cJSON_AddBoolToObject(response, "restart_required", restart_required);
+    cJSON_AddItemToObject(response, "changes", changes);
+
+    if (config_changed) {
+        cJSON_AddStringToObject(response, "message", "ADC configuration updated successfully");
+    } else {
+        cJSON_AddStringToObject(response, "message", "No valid configuration changes found");
+    }
+
+    ret = send_json_response(req, response);
+
+    cJSON_Delete(json);
+    cJSON_Delete(response);
+    g_network_manager.stats.api_requests++;
+
+    return ret;
+}
+
+// UART Configuration POST Handler
+static esp_err_t config_uart_post_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "UART configuration update request");
+
+    char *json_string = NULL;
+    esp_err_t ret = parse_request_body(req, &json_string);
+    if (ret != ESP_OK) {
+        return send_error_response(req, 400, "Failed to parse request body");
+    }
+
+    // Parse JSON
+    cJSON *json = cJSON_Parse(json_string);
+    free(json_string);
+
+    if (!json) {
+        return send_error_response(req, 400, "Invalid JSON format");
+    }
+
+    // Validate and apply UART configuration
+    bool config_changed = false;
+    bool restart_required = false;
+    cJSON *response = cJSON_CreateObject();
+    cJSON *changes = cJSON_CreateArray();
+
+    // Process port configurations
+    cJSON *ports = cJSON_GetObjectItem(json, "ports");
+    if (cJSON_IsArray(ports)) {
+        cJSON *port_item = NULL;
+        cJSON_ArrayForEach(port_item, ports) {
+            cJSON *port_num = cJSON_GetObjectItem(port_item, "port");
+            cJSON *enabled = cJSON_GetObjectItem(port_item, "enabled");
+            cJSON *baud_rate = cJSON_GetObjectItem(port_item, "baud_rate");
+
+            if (!cJSON_IsNumber(port_num)) {
+                continue;
+            }
+
+            int port = (int)cJSON_GetNumberValue(port_num);
+            if (port < 0 || port >= CONFIG_UART_PORT_COUNT) {
+                continue;
+            }
+
+            // Update enabled state
+            if (cJSON_IsBool(enabled)) {
+                bool new_enabled = cJSON_IsTrue(enabled);
+                if (uart_manager_is_channel_active(port) != new_enabled) {
+                    ret = config_update_uart(port, 0, new_enabled);  // Keep current baud rate
+                    if (ret == ESP_OK) {
+                        config_changed = true;
+                        restart_required = true;
+
+                        cJSON *change = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(change, "port", port);
+                        cJSON_AddStringToObject(change, "property", "enabled");
+                        cJSON_AddBoolToObject(change, "value", new_enabled);
+                        cJSON_AddItemToArray(changes, change);
+
+                        ESP_LOGI(TAG, "UART port %d enabled: %s", port, new_enabled ? "true" : "false");
+                    }
+                }
+            }
+
+            // Update baud rate
+            if (cJSON_IsNumber(baud_rate)) {
+                uint32_t new_baud = (uint32_t)cJSON_GetNumberValue(baud_rate);
+                // Validate common baud rates
+                if (new_baud == 9600 || new_baud == 19200 || new_baud == 38400 ||
+                    new_baud == 57600 || new_baud == 115200 || new_baud == 230400 ||
+                    new_baud == 460800 || new_baud == 921600) {
+
+                    // Get current config to preserve enabled state
+                    bool current_enabled = uart_manager_is_channel_active(port);
+                    ret = config_update_uart(port, new_baud, current_enabled);
+                    if (ret == ESP_OK) {
+                        config_changed = true;
+                        restart_required = true;
+
+                        cJSON *change = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(change, "port", port);
+                        cJSON_AddStringToObject(change, "property", "baud_rate");
+                        cJSON_AddNumberToObject(change, "value", new_baud);
+                        cJSON_AddItemToArray(changes, change);
+
+                        ESP_LOGI(TAG, "UART port %d baud rate: %lu", port, new_baud);
+                    }
+                }
+            }
+        }
+    }
+
+    // Build response
+    cJSON_AddBoolToObject(response, "success", config_changed);
+    cJSON_AddBoolToObject(response, "restart_required", restart_required);
+    cJSON_AddItemToObject(response, "changes", changes);
+
+    if (config_changed) {
+        cJSON_AddStringToObject(response, "message", "UART configuration updated successfully");
+    } else {
+        cJSON_AddStringToObject(response, "message", "No valid configuration changes found");
+    }
+
+    ret = send_json_response(req, response);
+
+    cJSON_Delete(json);
+    cJSON_Delete(response);
+    g_network_manager.stats.api_requests++;
+
+    return ret;
+}
+
+// Service Restart Coordination Functions
+static esp_err_t restart_adc_service(void) {
+    ESP_LOGI(TAG, "Restarting ADC service...");
+
+    // Stop ADC manager
+    esp_err_t ret = adc_manager_stop();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop ADC manager: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Small delay to ensure clean shutdown
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Restart ADC manager with new configuration
+    ret = adc_manager_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to restart ADC manager: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "ADC service restarted successfully");
+    return ESP_OK;
+}
+
+static esp_err_t restart_uart_service(void) {
+    ESP_LOGI(TAG, "Restarting UART service...");
+
+    // Stop UART manager
+    esp_err_t ret = uart_manager_stop();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop UART manager: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Small delay to ensure clean shutdown
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Restart UART manager with new configuration
+    ret = uart_manager_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to restart UART manager: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "UART service restarted successfully");
+    return ESP_OK;
+}
+
+static esp_err_t restart_data_logger_service(void) {
+    ESP_LOGI(TAG, "Restarting data logger coordination...");
+
+    // Stop data logger
+    esp_err_t ret = data_logger_stop();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop data logger: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Small delay to ensure clean shutdown
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // Restart data logger
+    ret = data_logger_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to restart data logger: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Data logger service restarted successfully");
+    return ESP_OK;
+}
+
+// Configuration Apply POST Handler
+static esp_err_t config_apply_post_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Configuration apply request");
+
+    char *json_string = NULL;
+    esp_err_t ret = parse_request_body(req, &json_string);
+    if (ret != ESP_OK) {
+        return send_error_response(req, 400, "Failed to parse request body");
+    }
+
+    // Parse JSON
+    cJSON *json = cJSON_Parse(json_string);
+    free(json_string);
+
+    if (!json) {
+        return send_error_response(req, 400, "Invalid JSON format");
+    }
+
+    cJSON *response = cJSON_CreateObject();
+    cJSON *results = cJSON_CreateArray();
+    bool overall_success = true;
+
+    // Check which services to restart
+    cJSON *restart_adc = cJSON_GetObjectItem(json, "restart_adc");
+    cJSON *restart_uart = cJSON_GetObjectItem(json, "restart_uart");
+    cJSON *restart_data_logger = cJSON_GetObjectItem(json, "restart_data_logger");
+
+    // Restart ADC service if requested
+    if (cJSON_IsTrue(restart_adc)) {
+        ESP_LOGI(TAG, "Applying ADC configuration changes...");
+        ret = restart_adc_service();
+
+        cJSON *adc_result = cJSON_CreateObject();
+        cJSON_AddStringToObject(adc_result, "service", "adc");
+        cJSON_AddBoolToObject(adc_result, "success", ret == ESP_OK);
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(adc_result, "message", "ADC service restarted successfully");
+        } else {
+            cJSON_AddStringToObject(adc_result, "message", "Failed to restart ADC service");
+            overall_success = false;
+        }
+        cJSON_AddItemToArray(results, adc_result);
+    }
+
+    // Restart UART service if requested
+    if (cJSON_IsTrue(restart_uart)) {
+        ESP_LOGI(TAG, "Applying UART configuration changes...");
+        ret = restart_uart_service();
+
+        cJSON *uart_result = cJSON_CreateObject();
+        cJSON_AddStringToObject(uart_result, "service", "uart");
+        cJSON_AddBoolToObject(uart_result, "success", ret == ESP_OK);
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(uart_result, "message", "UART service restarted successfully");
+        } else {
+            cJSON_AddStringToObject(uart_result, "message", "Failed to restart UART service");
+            overall_success = false;
+        }
+        cJSON_AddItemToArray(results, uart_result);
+    }
+
+    // Restart data logger if requested (usually after ADC/UART changes)
+    if (cJSON_IsTrue(restart_data_logger)) {
+        ESP_LOGI(TAG, "Applying data logger configuration changes...");
+        ret = restart_data_logger_service();
+
+        cJSON *logger_result = cJSON_CreateObject();
+        cJSON_AddStringToObject(logger_result, "service", "data_logger");
+        cJSON_AddBoolToObject(logger_result, "success", ret == ESP_OK);
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(logger_result, "message", "Data logger restarted successfully");
+        } else {
+            cJSON_AddStringToObject(logger_result, "message", "Failed to restart data logger");
+            overall_success = false;
+        }
+        cJSON_AddItemToArray(results, logger_result);
+    }
+
+    // Build response
+    cJSON_AddBoolToObject(response, "success", overall_success);
+    cJSON_AddItemToObject(response, "results", results);
+
+    if (overall_success) {
+        cJSON_AddStringToObject(response, "message", "Configuration applied successfully");
+    } else {
+        cJSON_AddStringToObject(response, "message", "Some configuration changes failed to apply");
+    }
+
+    ret = send_json_response(req, response);
+
+    cJSON_Delete(json);
+    cJSON_Delete(response);
+    g_network_manager.stats.api_requests++;
+
+    return ret;
 }
 
 // WebSocket handler based on ESP-IDF example
@@ -674,6 +1137,7 @@ esp_err_t network_manager_start_http_server(void) {
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     server_config.server_port = config->network_config.http_port;
     server_config.max_open_sockets = config->network_config.max_clients;
+    server_config.max_uri_handlers = 12;  // Increase from default 8 to support WebSocket + all API endpoints
     server_config.task_priority = 5;
     server_config.stack_size = 8192;
     server_config.enable_so_linger = true;
@@ -714,6 +1178,31 @@ esp_err_t network_manager_start_http_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(g_network_manager.http_server, &test_uri);
+
+        // Configuration POST endpoints
+        httpd_uri_t config_adc_post_uri = {
+            .uri = "/api/config/adc",
+            .method = HTTP_POST,
+            .handler = config_adc_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &config_adc_post_uri);
+
+        httpd_uri_t config_uart_post_uri = {
+            .uri = "/api/config/uart",
+            .method = HTTP_POST,
+            .handler = config_uart_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &config_uart_post_uri);
+
+        httpd_uri_t config_apply_post_uri = {
+            .uri = "/api/config/apply",
+            .method = HTTP_POST,
+            .handler = config_apply_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(g_network_manager.http_server, &config_apply_post_uri);
 
         httpd_uri_t root_uri = {
             .uri = "/",

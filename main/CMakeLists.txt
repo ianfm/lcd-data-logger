@@ -27,4 +27,26 @@ idf_component_register(
                               "./Wireless"
                               "./DataLogger"
                               "."
+
+                         REQUIRES
+                              esp_http_server
+                              esp_ringbuf
+                              esp_driver_gpio
+                              esp_driver_spi
+                              esp_driver_uart
+                              esp_driver_i2c
+                              esp_driver_ledc
+                              esp_adc
+                              fatfs
+                              sdmmc
+                              esp_timer
+                              nvs_flash
+                              esp_wifi
+                              esp_netif
+                              esp_event
+                              json
+                              driver
+                              spi_flash
+                              esp_lcd
+                              bt
                        )

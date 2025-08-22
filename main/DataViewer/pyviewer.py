@@ -1,5 +1,7 @@
 import requests
 import matplotlib
+# Configure matplotlib backend before importing pyplot
+matplotlib.use('TkAgg')  # Use TkAgg backend which behaves better
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import time
@@ -29,6 +31,14 @@ def setup_matplotlib_backend():
 # Setup backend early
 INTERACTIVE_MODE = setup_matplotlib_backend()
 
+# Configure matplotlib for better window behavior
+if INTERACTIVE_MODE:
+    try:
+        matplotlib.rcParams['figure.raise_window'] = False
+        matplotlib.rcParams['figure.max_open_warning'] = 0
+    except Exception:
+        pass  # Ignore if these settings aren't available
+
 class ESP32DataLogger:
     def __init__(self, host='192.168.86.100', port=80):
         self.base_url = f'http://{host}:{port}'
@@ -38,9 +48,14 @@ class ESP32DataLogger:
         self.running = False
 
     def get_latest_data(self):
-        """Fallback HTTP method"""
-        response = requests.get(f'{self.base_url}/api/data/latest')
-        return response.json()
+        """Fallback HTTP method with timeout and error handling"""
+        try:
+            response = requests.get(f'{self.base_url}/api/data/latest', timeout=2)  # Slightly longer timeout
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException:
+            # Return None on any network error - don't print to avoid spam
+            return None
 
     def on_message(self, _ws, message):
         """WebSocket message handler"""
@@ -78,9 +93,17 @@ class ESP32DataLogger:
         ws_thread.daemon = True
         ws_thread.start()
 
-        # Wait for connection
-        time.sleep(2)
-        return self.running
+        # Wait with timeout to see if connection succeeds
+        connection_timeout = 8.0  # 8 second timeout - more generous for ESP32
+        start_time = time.time()
+
+        while time.time() - start_time < connection_timeout:
+            if self.running:  # Connection succeeded
+                return True
+            time.sleep(0.1)
+
+        print("WebSocket connection timeout - falling back to HTTP polling")
+        return False
 
 # Parse command line arguments
 def parse_arguments():
@@ -124,6 +147,16 @@ buttons = {}
 fig = None
 ax = None
 
+# Global flag to control main loops
+running = True
+
+def on_window_close(event):
+    """Handle window close event"""
+    global running
+    print("Window closed by user, terminating...")
+    running = False
+    plt.close('all')  # Close all matplotlib windows
+
 # Button callback functions
 def toggle_channel(channel_num):
     """Toggle visibility of a specific channel"""
@@ -159,7 +192,6 @@ def safe_plot_setup():
         ax.set_ylabel('Voltage (V)')
 
         # Create toggle buttons for each channel
-        colors = ['blue', 'red', 'green', 'orange']
         button_width = 0.08
         button_height = 0.04
         button_spacing = 0.02
@@ -176,6 +208,37 @@ def safe_plot_setup():
             button = Button(button_ax, f'ADC{i}: ON', color='lightgreen')
             button.on_clicked(toggle_channel(i))
             buttons[i] = button
+
+        # Connect window close event
+        fig.canvas.mpl_connect('close_event', on_window_close)
+
+        # Configure window behavior to prevent always-on-top
+        try:
+            # Get the window manager and configure it properly
+            manager = fig.canvas.manager
+            if hasattr(manager, 'window'):
+                # For TkAgg backend - disable always on top
+                if hasattr(manager.window, 'wm_attributes'):
+                    try:
+                        manager.window.wm_attributes('-topmost', False)
+                    except Exception:
+                        pass  # Ignore if this attribute isn't supported
+
+                # Alternative method for some systems
+                elif hasattr(manager.window, 'attributes'):
+                    try:
+                        manager.window.attributes('-topmost', False)
+                    except Exception:
+                        pass
+
+                # Set window to normal behavior (not always focused)
+                if hasattr(manager.window, 'focus_set'):
+                    # Don't force focus
+                    pass
+
+        except Exception:
+            # If window configuration fails, continue silently
+            pass
 
         return fig, ax, True
     except Exception as e:
@@ -242,8 +305,14 @@ if logger.start_websocket():
     plot_interval = 0.1  # Update plot every 100ms
     time_window = 10.0   # Show last 10 seconds of data
 
-    while True:
+    while running:
         try:
+            # Check if matplotlib window is still open
+            if not plt.get_fignums():
+                print("Plot window closed, terminating...")
+                running = False
+                break
+
             # Get data from WebSocket queue (non-blocking)
             data = logger.data_queue.get_nowait()
 
@@ -282,65 +351,139 @@ if logger.start_websocket():
             continue
         except KeyboardInterrupt:
             print("Stopping...")
+            running = False
             break
 
 else:
     print("WebSocket failed, falling back to HTTP polling")
+    print("Note: If ESP32 is unreachable, you can still close the window to exit")
+
     # Fallback to original HTTP method - reset data structure for HTTP (4 channels)
     http_timestamps = []
     http_adc_data = {0: [], 1: [], 2: [], 3: []}
 
-    while True:
+    # Connection status tracking
+    connection_failed_count = 0
+    last_successful_connection = time.time()
+    show_connection_status = True
+
+    while running:
         try:
+            # Check if matplotlib window is still open (responsive exit)
+            if not plt.get_fignums():
+                print("Plot window closed, terminating...")
+                running = False
+                break
+
+            # Allow matplotlib to process events (keeps window responsive)
+            if INTERACTIVE_MODE:
+                plt.pause(0.01)  # Very short pause to process GUI events
+
             data = logger.get_latest_data()
-            current_time = time.time()
 
-            http_timestamps.append(current_time)
-            # Try to get data for all 4 channels, fallback to 0 if not available
-            for ch in range(4):
+            if data is not None:
+                # Successful connection
+                if connection_failed_count > 0:
+                    print("✓ Connection restored!")
+                    connection_failed_count = 0
+                    show_connection_status = True
+
+                last_successful_connection = time.time()
+                current_time = time.time()
+
+                http_timestamps.append(current_time)
+                # Try to get data for all 4 channels, fallback to 0 if not available
+                for ch in range(4):
+                    try:
+                        voltage = data['adc'][f'channel{ch}']['voltage']
+                        http_adc_data[ch].append(voltage)
+                    except (KeyError, TypeError):
+                        http_adc_data[ch].append(0.0)  # Default value if channel not available
+
+                # Keep only last 100 points
+                if len(http_timestamps) > 100:
+                    http_timestamps.pop(0)
+                    for ch in range(4):
+                        http_adc_data[ch].pop(0)
+
                 try:
-                    voltage = data['adc'][f'channel{ch}']['voltage']
-                    http_adc_data[ch].append(voltage)
-                except (KeyError, TypeError):
-                    http_adc_data[ch].append(0.0)  # Default value if channel not available
+                    ax.clear()
 
-            # Keep only last 100 points
-            if len(http_timestamps) > 100:
-                http_timestamps.pop(0)
-                for ch in range(4):
-                    http_adc_data[ch].pop(0)
+                    # Show connection status in title
+                    title = 'ESP32 ADC Data (HTTP Polling) - Click buttons to toggle channels'
+                    if connection_failed_count > 0:
+                        title += f' [Connection Issues: {connection_failed_count} failures]'
+                    ax.set_title(title)
 
-            try:
-                ax.clear()
-                ax.set_title('ESP32 ADC Data (HTTP Polling) - Click buttons to toggle channels')
-                colors = ['blue', 'red', 'green', 'orange']
-                visible_channels = []
-                for ch in range(4):
-                    # Only plot if channel is visible and we have non-zero data
-                    if channel_visible[ch] and any(v != 0.0 for v in http_adc_data[ch]):
-                        ax.plot(http_timestamps, http_adc_data[ch], label=f'ADC{ch}', color=colors[ch])
-                        visible_channels.append(ch)
+                    colors = ['blue', 'red', 'green', 'orange']
+                    visible_channels = []
+                    for ch in range(4):
+                        # Only plot if channel is visible and we have non-zero data
+                        if channel_visible[ch] and any(v != 0.0 for v in http_adc_data[ch]):
+                            ax.plot(http_timestamps, http_adc_data[ch], label=f'ADC{ch}', color=colors[ch])
+                            visible_channels.append(ch)
 
-                # Only show legend if there are visible channels
-                if visible_channels:
-                    ax.legend()
-                ax.grid(True, alpha=0.3)
+                    # Only show legend if there are visible channels
+                    if visible_channels:
+                        ax.legend()
+                    ax.grid(True, alpha=0.3)
 
-                if INTERACTIVE_MODE:
-                    plt.draw()
-                    plt.pause(0.1)
+                    if INTERACTIVE_MODE:
+                        plt.draw()
+                    else:
+                        plt.savefig('adc_http_polling.png', dpi=100, bbox_inches='tight')
+                        print("HTTP plot saved to adc_http_polling.png")
+                        time.sleep(0.5)  # Slower updates for file mode
+
+                except Exception as e:
+                    print(f"HTTP plot update failed: {e}")
+
+            else:
+                # Connection failed
+                connection_failed_count += 1
+
+                # Show status message less frequently - wait a bit before first error
+                if (connection_failed_count >= 3 and show_connection_status) or connection_failed_count % 15 == 0:
+                    print(f"⚠ Unable to connect to ESP32 at {args.ip}:{args.port} (attempt {connection_failed_count})")
+                    print("  - Check IP address and ensure ESP32 is running")
+                    print("  - You can close the window to exit at any time")
+                    show_connection_status = False
+
+                # Update plot title to show connection status (but not immediately)
+                if connection_failed_count >= 3:  # Wait a few attempts before showing error visually
+                    try:
+                        ax.clear()
+                        ax.set_title(f'ESP32 ADC Data - Connection Failed (attempt {connection_failed_count})')
+                        ax.text(0.5, 0.5, f'Unable to connect to ESP32\nat {args.ip}:{args.port}\n\nClose window to exit',
+                               horizontalalignment='center', verticalalignment='center',
+                               transform=ax.transAxes, fontsize=12,
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+                        ax.grid(True, alpha=0.3)
+
+                        if INTERACTIVE_MODE:
+                            plt.draw()
+                    except Exception as e:
+                        print(f"Status plot update failed: {e}")
                 else:
-                    plt.savefig('adc_http_polling.png', dpi=100, bbox_inches='tight')
-                    print("HTTP plot saved to adc_http_polling.png")
-                    time.sleep(0.5)  # Slower updates for file mode
-            except Exception as e:
-                print(f"HTTP plot update failed: {e}")
-                time.sleep(0.1)
+                    # For the first few attempts, just show a "connecting" message
+                    try:
+                        ax.clear()
+                        ax.set_title(f'ESP32 ADC Data - Connecting... (attempt {connection_failed_count})')
+                        ax.text(0.5, 0.5, f'Connecting to ESP32\nat {args.ip}:{args.port}\n\nPlease wait...',
+                               horizontalalignment='center', verticalalignment='center',
+                               transform=ax.transAxes, fontsize=12,
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.7))
+                        ax.grid(True, alpha=0.3)
+
+                        if INTERACTIVE_MODE:
+                            plt.draw()
+                    except Exception as e:
+                        print(f"Status plot update failed: {e}")
+
+                # Short sleep to prevent busy waiting, but keep responsive
+                time.sleep(0.5)
 
         except KeyboardInterrupt:
             print("Stopping...")
+            running = False
             break
-        except Exception as e:
-            print(f"HTTP polling error: {e}")
-            print("Unable to connect to ESP32. Please check IP address and ensure device is running.")
-            time.sleep(2)  # Wait before retrying

@@ -4,14 +4,29 @@ Demo script to show the button functionality of the ESP32 ADC viewer
 This creates a simple plot with simulated data and interactive buttons
 """
 
+import matplotlib
+# Configure matplotlib backend and window behavior
+matplotlib.use('TkAgg')
+matplotlib.rcParams['figure.raise_window'] = False
+matplotlib.rcParams['figure.max_open_warning'] = 0
+
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import numpy as np
-import time
 
 # Channel visibility state
 channel_visible = {0: True, 1: True, 2: True, 3: True}
 buttons = {}
+
+# Global flag to control the demo
+running = True
+
+def on_window_close(event):
+    """Handle window close event"""
+    global running
+    print("Demo window closed by user, terminating...")
+    running = False
+    plt.close('all')
 
 def toggle_channel(channel_num):
     """Toggle visibility of a specific channel"""
@@ -82,6 +97,17 @@ for i in range(4):
     button = Button(button_ax, f'ADC{i}: ON', color='lightgreen')
     button.on_clicked(toggle_channel(i))
     buttons[i] = button
+
+# Connect window close event
+fig.canvas.mpl_connect('close_event', on_window_close)
+
+# Configure window behavior to prevent always-on-top
+try:
+    manager = fig.canvas.manager
+    if hasattr(manager, 'window') and hasattr(manager.window, 'wm_attributes'):
+        manager.window.wm_attributes('-topmost', False)
+except Exception:
+    pass  # Ignore if window configuration fails
 
 # Initial plot
 update_plot()
