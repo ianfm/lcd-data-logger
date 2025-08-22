@@ -390,12 +390,13 @@ void adc_display_init(void)
 
     // Create labels for each ADC channel - positioned just below "ADC Readings" title
     // Using TOP_MID alignment with offset from title (title is at y=25, so start at y=50 for a bit more space)
+    // Reduced spacing to fit 4 channels: 20px spacing instead of 25px
     for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
         if (adc_manager_is_channel_enabled(i)) {
             adc_value_labels[i] = lv_label_create(lv_scr_act());
             lv_label_set_text(adc_value_labels[i], "ADC0: -.---V");
             lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0x00ff00), LV_PART_MAIN);
-            lv_obj_align(adc_value_labels[i], LV_ALIGN_TOP_MID, 0, 50 + (i * 25));
+            lv_obj_align(adc_value_labels[i], LV_ALIGN_TOP_MID, 0, 50 + (i * 20));
         }
     }
 

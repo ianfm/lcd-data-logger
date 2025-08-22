@@ -83,7 +83,9 @@ esp_err_t hal_test_all_hardware(void);
 
 #define HAL_ADC_CHANNEL_MAP { \
     CONFIG_ADC1_PIN, \
-    CONFIG_ADC2_PIN \
+    CONFIG_ADC2_PIN, \
+    CONFIG_ADC3_PIN, \
+    CONFIG_ADC4_PIN \
 }
 
 // Hardware Validation Macros

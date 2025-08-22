@@ -428,33 +428,44 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// WebSocket streaming task - batch both channels together
+// WebSocket streaming task - batch all channels together
 static void websocket_streaming_task(void* pvParameters) {
     ESP_LOGI(TAG, "WebSocket streaming task started");
 
-    adc_data_packet_t adc_packets[2]; // Buffer for both channels
-    bool channel_data[2] = {false, false}; // Track which channels we have data for
+    adc_data_packet_t adc_packets[CONFIG_ADC_CHANNEL_COUNT]; // Buffer for all channels
+    bool channel_data[CONFIG_ADC_CHANNEL_COUNT] = {false}; // Track which channels we have data for
 
     while (g_network_manager.websocket_running) {
         // Clear channel data flags
-        channel_data[0] = false;
-        channel_data[1] = false;
+        for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+            channel_data[i] = false;
+        }
 
-        // Try to get data for both channels
+        // Try to get data for all channels
         adc_data_packet_t packet;
         int attempts = 0;
-        while (attempts < 10 && (!channel_data[0] || !channel_data[1])) {
+        bool all_channels_ready = false;
+        while (attempts < 20 && !all_channels_ready) {
             if (adc_manager_get_data(&packet, 5) == ESP_OK) {
-                if (packet.channel < 2) {
+                if (packet.channel < CONFIG_ADC_CHANNEL_COUNT) {
                     adc_packets[packet.channel] = packet;
                     channel_data[packet.channel] = true;
                 }
             }
             attempts++;
+
+            // Check if we have data for all enabled channels
+            all_channels_ready = true;
+            for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
+                if (adc_manager_is_channel_enabled(i) && !channel_data[i]) {
+                    all_channels_ready = false;
+                    break;
+                }
+            }
         }
 
         // Send data for any channels we have
-        for (int ch = 0; ch < 2; ch++) {
+        for (int ch = 0; ch < CONFIG_ADC_CHANNEL_COUNT; ch++) {
             if (channel_data[ch]) {
                 // Create JSON message for this channel
                 cJSON *json = cJSON_CreateObject();

@@ -1,10 +1,13 @@
 import requests
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 import time
 import json
 import threading
 import queue
+import argparse
+import sys
 from websocket import WebSocketApp
 
 # Fix matplotlib backend issues for Python 3.12.3 and interactive plotting
@@ -79,50 +82,133 @@ class ESP32DataLogger:
         time.sleep(2)
         return self.running
 
-# Real-time plotting with WebSocket
-logger = ESP32DataLogger()
+# Parse command line arguments
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='ESP32 ADC Data Viewer - Real-time plotting via WebSocket')
+    parser.add_argument('--ip', '-i',
+                       default='192.168.86.100',
+                       help='IP address of the ESP32 device (default: 192.168.86.100)')
+    parser.add_argument('--port', '-p',
+                       type=int,
+                       default=80,
+                       help='Port number of the ESP32 HTTP server (default: 80)')
+    return parser.parse_args()
 
-# Data storage for plotting - separate timestamps for each channel
+# Parse arguments
+args = parse_arguments()
+
+# Display connection info
+if args.ip == '192.168.86.100':
+    print(f"No IP address specified, using default: {args.ip}")
+else:
+    print(f"Using specified IP address: {args.ip}")
+
+print(f"Connecting to ESP32 at {args.ip}:{args.port}")
+
+# Real-time plotting with WebSocket
+logger = ESP32DataLogger(host=args.ip, port=args.port)
+
+# Data storage for plotting - separate timestamps for each channel (4 channels)
 adc_data = {
     0: {'timestamps': [], 'voltages': []},
-    1: {'timestamps': [], 'voltages': []}
+    1: {'timestamps': [], 'voltages': []},
+    2: {'timestamps': [], 'voltages': []},
+    3: {'timestamps': [], 'voltages': []}
 }
 
-# Setup plotting with backend compatibility
+# Channel visibility state - all channels enabled by default
+channel_visible = {0: True, 1: True, 2: True, 3: True}
+
+# Global variables for buttons and plot
+buttons = {}
+fig = None
+ax = None
+
+# Button callback functions
+def toggle_channel(channel_num):
+    """Toggle visibility of a specific channel"""
+    def callback(event):
+        channel_visible[channel_num] = not channel_visible[channel_num]
+        # Update button text and color
+        if channel_visible[channel_num]:
+            buttons[channel_num].label.set_text(f'ADC{channel_num}: ON')
+            buttons[channel_num].color = 'lightgreen'
+        else:
+            buttons[channel_num].label.set_text(f'ADC{channel_num}: OFF')
+            buttons[channel_num].color = 'lightcoral'
+        # Redraw the button
+        buttons[channel_num].ax.figure.canvas.draw_idle()
+    return callback
+
+# Setup plotting with backend compatibility and buttons
 def safe_plot_setup():
-    """Setup matplotlib plotting with error handling"""
+    """Setup matplotlib plotting with error handling and interactive buttons"""
+    global fig, ax, buttons
     try:
         if INTERACTIVE_MODE:
             plt.ion()  # Interactive mode
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
+
+        # Create figure with extra space for buttons
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        # Adjust main plot to make room for buttons
+        plt.subplots_adjust(bottom=0.15, right=0.85)
+
+        ax.set_title('ESP32 ADC Real-time Data (WebSocket) - Click buttons to toggle channels')
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Voltage (V)')
+
+        # Create toggle buttons for each channel
+        colors = ['blue', 'red', 'green', 'orange']
+        button_width = 0.08
+        button_height = 0.04
+        button_spacing = 0.02
+
+        for i in range(4):
+            # Position buttons vertically on the right side
+            button_x = 0.87
+            button_y = 0.8 - (i * (button_height + button_spacing))
+
+            # Create button axes
+            button_ax = plt.axes([button_x, button_y, button_width, button_height])
+
+            # Create button with initial state
+            button = Button(button_ax, f'ADC{i}: ON', color='lightgreen')
+            button.on_clicked(toggle_channel(i))
+            buttons[i] = button
+
         return fig, ax, True
     except Exception as e:
         print(f"Plot setup failed: {e}")
         return None, None, False
 
 def safe_plot_update(ax, adc_data, start_time, time_window):
-    """Safely update plot with error handling"""
+    """Safely update plot with error handling and channel visibility"""
     try:
         ax.clear()
-        ax.set_title('ESP32 ADC Real-time Data (WebSocket)')
+        ax.set_title('ESP32 ADC Real-time Data (WebSocket) - Click buttons to toggle channels')
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Voltage (V)')
 
-        # Plot each channel as line plot
+        # Plot each channel as line plot with different colors (only if visible)
+        colors = ['blue', 'red', 'green', 'orange']  # Colors for channels 0, 1, 2, 3
         for channel_num, channel_data in adc_data.items():
-            if len(channel_data['voltages']) > 0:
+            # Only plot if channel is visible and has data
+            if channel_visible[channel_num] and len(channel_data['voltages']) > 0:
+                color = colors[channel_num] if channel_num < len(colors) else 'black'
                 ax.plot(channel_data['timestamps'], channel_data['voltages'],
-                       label=f'ADC{channel_num}', marker='o', markersize=1, linewidth=1)
+                       label=f'ADC{channel_num}', marker='o', markersize=1, linewidth=1, color=color)
 
         # Set consistent axis limits
         current_time_now = time.time() - start_time
         ax.set_xlim(current_time_now - time_window, current_time_now)
         ax.set_ylim(0, 3.3)  # 0-3.3V range for ESP32 ADC
 
-        ax.legend()
+        # Only show legend if there are visible channels
+        visible_channels = [ch for ch in range(4) if channel_visible[ch] and len(adc_data[ch]['voltages']) > 0]
+        if visible_channels:
+            ax.legend()
+
         ax.grid(True, alpha=0.3)
 
         if INTERACTIVE_MODE:
@@ -144,6 +230,8 @@ if not plot_success:
     exit(1)
 
 print(f"Plotting mode: {'Interactive' if INTERACTIVE_MODE else 'File output'}")
+print(f"WebSocket URL: {logger.ws_url}")
+print(f"HTTP API URL: {logger.base_url}")
 
 # Try to connect via WebSocket
 if logger.start_websocket():
@@ -198,9 +286,9 @@ if logger.start_websocket():
 
 else:
     print("WebSocket failed, falling back to HTTP polling")
-    # Fallback to original HTTP method - reset data structure for HTTP
+    # Fallback to original HTTP method - reset data structure for HTTP (4 channels)
     http_timestamps = []
-    http_adc_data = {0: [], 1: []}
+    http_adc_data = {0: [], 1: [], 2: [], 3: []}
 
     while True:
         try:
@@ -208,21 +296,34 @@ else:
             current_time = time.time()
 
             http_timestamps.append(current_time)
-            http_adc_data[0].append(data['adc']['channel0']['voltage'])
-            http_adc_data[1].append(data['adc']['channel1']['voltage'])
+            # Try to get data for all 4 channels, fallback to 0 if not available
+            for ch in range(4):
+                try:
+                    voltage = data['adc'][f'channel{ch}']['voltage']
+                    http_adc_data[ch].append(voltage)
+                except (KeyError, TypeError):
+                    http_adc_data[ch].append(0.0)  # Default value if channel not available
 
             # Keep only last 100 points
             if len(http_timestamps) > 100:
                 http_timestamps.pop(0)
-                http_adc_data[0].pop(0)
-                http_adc_data[1].pop(0)
+                for ch in range(4):
+                    http_adc_data[ch].pop(0)
 
             try:
                 ax.clear()
-                ax.set_title('ESP32 ADC Data (HTTP Polling)')
-                ax.plot(http_timestamps, http_adc_data[0], label='ADC0')
-                ax.plot(http_timestamps, http_adc_data[1], label='ADC1')
-                ax.legend()
+                ax.set_title('ESP32 ADC Data (HTTP Polling) - Click buttons to toggle channels')
+                colors = ['blue', 'red', 'green', 'orange']
+                visible_channels = []
+                for ch in range(4):
+                    # Only plot if channel is visible and we have non-zero data
+                    if channel_visible[ch] and any(v != 0.0 for v in http_adc_data[ch]):
+                        ax.plot(http_timestamps, http_adc_data[ch], label=f'ADC{ch}', color=colors[ch])
+                        visible_channels.append(ch)
+
+                # Only show legend if there are visible channels
+                if visible_channels:
+                    ax.legend()
                 ax.grid(True, alpha=0.3)
 
                 if INTERACTIVE_MODE:
@@ -239,3 +340,7 @@ else:
         except KeyboardInterrupt:
             print("Stopping...")
             break
+        except Exception as e:
+            print(f"HTTP polling error: {e}")
+            print("Unable to connect to ESP32. Please check IP address and ensure device is running.")
+            time.sleep(2)  # Wait before retrying

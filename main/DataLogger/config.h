@@ -10,7 +10,7 @@ extern "C" {
 
 // Hardware Configuration
 #define CONFIG_UART_PORT_COUNT          2  // ESP32-C6 has only UART0 and UART1
-#define CONFIG_ADC_CHANNEL_COUNT        2  // ESP32-C6 - using only first 2 ADC channels
+#define CONFIG_ADC_CHANNEL_COUNT        4  // ESP32-C6 - using first 4 ADC channels
 #define CONFIG_MAX_DEVICE_NAME_LEN      32
 #define CONFIG_MAX_WIFI_SSID_LEN        32
 #define CONFIG_MAX_WIFI_PASSWORD_LEN    64
@@ -51,6 +51,7 @@ extern "C" {
 #define CONFIG_ADC1_PIN                 ADC_CHANNEL_0  // GPIO0
 #define CONFIG_ADC2_PIN                 ADC_CHANNEL_1  // GPIO1
 #define CONFIG_ADC3_PIN                 ADC_CHANNEL_2  // GPIO2
+#define CONFIG_ADC4_PIN                 ADC_CHANNEL_3  // GPIO3
 
 // System Configuration Structure
 typedef struct {
