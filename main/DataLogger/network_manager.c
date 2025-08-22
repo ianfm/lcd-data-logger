@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_http_server.h"
 // Note: WebSocket server support (esp_http_server_ws.h) is not available in ESP-IDF v5.5
 #include "esp_timer.h"
@@ -1243,6 +1244,36 @@ esp_err_t network_manager_start_http_server(void) {
 
 bool network_manager_is_wifi_connected(void) {
     return g_network_manager.wifi_connected;
+}
+
+esp_err_t network_manager_get_ip_info(char* ip_str, size_t max_len) {
+    if (!ip_str || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!g_network_manager.wifi_connected) {
+        strncpy(ip_str, "Not connected", max_len - 1);
+        ip_str[max_len - 1] = '\0';
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL) {
+        strncpy(ip_str, "No interface", max_len - 1);
+        ip_str[max_len - 1] = '\0';
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    esp_err_t ret = esp_netif_get_ip_info(netif, &ip_info);
+    if (ret != ESP_OK) {
+        strncpy(ip_str, "IP unavailable", max_len - 1);
+        ip_str[max_len - 1] = '\0';
+        return ret;
+    }
+
+    snprintf(ip_str, max_len, IPSTR, IP2STR(&ip_info.ip));
+    return ESP_OK;
 }
 
 bool network_manager_is_http_server_running(void) {

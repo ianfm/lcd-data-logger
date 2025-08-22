@@ -470,7 +470,7 @@ void adc_display_update_timer(lv_timer_t * timer)
 
     // Update live WiFi status
     if (live_wifi_label != NULL) {
-        char wifi_buffer[80];
+        char wifi_buffer[150];
         if (network_manager_is_wifi_connected()) {
             wifi_ap_record_t ap_info;
             esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
@@ -478,17 +478,40 @@ void adc_display_update_timer(lv_timer_t * timer)
                 int rssi_percent = 100 + ap_info.rssi + 30;
                 if (rssi_percent > 100) rssi_percent = 100;
                 if (rssi_percent < 0) rssi_percent = 0;
-                // Shorten SSID to prevent clipping and put RSSI on separate line
-                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: %.8s\n      %ddBm", (char*)ap_info.ssid, ap_info.rssi);
+
+                // Get IP address
+                char ip_str[16];
+                esp_err_t ip_ret = network_manager_get_ip_info(ip_str, sizeof(ip_str));
+
+                // Format: WiFi, SSID, IP, and RSSI on separate lines, center-aligned
+                if (ip_ret == ESP_OK) {
+                    snprintf(wifi_buffer, sizeof(wifi_buffer),
+                            "WiFi:\n%.20s\n%s\n%ddBm (%d%%)",
+                            (char*)ap_info.ssid, ip_str, ap_info.rssi, rssi_percent);
+                } else {
+                    snprintf(wifi_buffer, sizeof(wifi_buffer),
+                            "WiFi:\n%.20s\n%ddBm (%d%%)",
+                            (char*)ap_info.ssid, ap_info.rssi, rssi_percent);
+                }
                 lv_obj_set_style_text_color(live_wifi_label, lv_color_hex(0x00ff00), LV_PART_MAIN);
             } else {
-                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Connected");
+                // Get IP address even if AP info fails
+                char ip_str[16];
+                esp_err_t ip_ret = network_manager_get_ip_info(ip_str, sizeof(ip_str));
+                if (ip_ret == ESP_OK) {
+                    snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nConnected\n%s", ip_str);
+                } else {
+                    snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nConnected");
+                }
                 lv_obj_set_style_text_color(live_wifi_label, lv_color_hex(0x00ff00), LV_PART_MAIN);
             }
         } else {
-            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Disconnected");
+            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nDisconnected");
             lv_obj_set_style_text_color(live_wifi_label, lv_color_hex(0xff0000), LV_PART_MAIN);
         }
+
+        // Set center alignment for the WiFi status text
+        lv_obj_set_style_text_align(live_wifi_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_label_set_text(live_wifi_label, wifi_buffer);
     }
 
@@ -644,7 +667,7 @@ void boot_wifi_status_update(void)
 {
     if (boot_wifi_label == NULL) return;
 
-    char wifi_buffer[80];
+    char wifi_buffer[150];
 
     if (network_manager_is_wifi_connected()) {
         // Get WiFi info
@@ -657,27 +680,47 @@ void boot_wifi_status_update(void)
             if (rssi_percent > 100) rssi_percent = 100;
             if (rssi_percent < 0) rssi_percent = 0;
 
-            // Format: "WiFi: MyNetwork -45dBm (92%)"
-            snprintf(wifi_buffer, sizeof(wifi_buffer),
-                    "WiFi: %.16s %ddBm (%d%%)",
-                    (char*)ap_info.ssid, ap_info.rssi, rssi_percent);
+            // Get IP address
+            char ip_str[16];
+            esp_err_t ip_ret = network_manager_get_ip_info(ip_str, sizeof(ip_str));
+
+            // Format: WiFi, SSID, IP, and RSSI on separate lines, center-aligned
+            if (ip_ret == ESP_OK) {
+                snprintf(wifi_buffer, sizeof(wifi_buffer),
+                        "WiFi:\n%.20s\n%s\n%ddBm (%d%%)",
+                        (char*)ap_info.ssid, ip_str, ap_info.rssi, rssi_percent);
+            } else {
+                snprintf(wifi_buffer, sizeof(wifi_buffer),
+                        "WiFi:\n%.20s\n%ddBm (%d%%)",
+                        (char*)ap_info.ssid, ap_info.rssi, rssi_percent);
+            }
 
             // Green for good connection
             lv_obj_set_style_text_color(boot_wifi_label, lv_color_hex(0x00ff00), LV_PART_MAIN);
         } else {
-            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Connected (no details)");
+            // Get IP address even if AP info fails
+            char ip_str[16];
+            esp_err_t ip_ret = network_manager_get_ip_info(ip_str, sizeof(ip_str));
+            if (ip_ret == ESP_OK) {
+                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nConnected\n%s", ip_str);
+            } else {
+                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nConnected");
+            }
             lv_obj_set_style_text_color(boot_wifi_label, lv_color_hex(0x00ff00), LV_PART_MAIN);
         }
     } else {
         // Check if WiFi scan is complete or still scanning
         if (!network_manager_is_scan_complete()) {
-            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Scanning networks...");
+            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nScanning networks...");
             lv_obj_set_style_text_color(boot_wifi_label, lv_color_hex(0xffff00), LV_PART_MAIN); // Yellow
         } else {
-            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Not connected");
+            snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi:\nNot connected");
             lv_obj_set_style_text_color(boot_wifi_label, lv_color_hex(0xff0000), LV_PART_MAIN); // Red
         }
     }
+
+    // Set center alignment for the boot WiFi status text
+    lv_obj_set_style_text_align(boot_wifi_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
     lv_label_set_text(boot_wifi_label, wifi_buffer);
     lv_timer_handler(); // Force immediate update
