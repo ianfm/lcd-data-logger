@@ -388,27 +388,28 @@ void adc_display_init(void)
     lv_obj_set_style_text_color(adc_title_label, lv_color_hex(0xffffff), LV_PART_MAIN);
     lv_obj_align(adc_title_label, LV_ALIGN_TOP_MID, 0, 25);
 
-    // Create labels for each ADC channel - positioned in middle area
+    // Create labels for each ADC channel - positioned just below "ADC Readings" title
+    // Using TOP_MID alignment with offset from title (title is at y=25, so start at y=50 for a bit more space)
     for (int i = 0; i < CONFIG_ADC_CHANNEL_COUNT; i++) {
         if (adc_manager_is_channel_enabled(i)) {
             adc_value_labels[i] = lv_label_create(lv_scr_act());
             lv_label_set_text(adc_value_labels[i], "ADC0: -.---V");
             lv_obj_set_style_text_color(adc_value_labels[i], lv_color_hex(0x00ff00), LV_PART_MAIN);
-            lv_obj_align(adc_value_labels[i], LV_ALIGN_CENTER, 0, -30 + (i * 25));
+            lv_obj_align(adc_value_labels[i], LV_ALIGN_TOP_MID, 0, 50 + (i * 25));
         }
     }
 
-    // Create live WiFi status label - lower area
+    // Create live WiFi status label - lower area (moved up to avoid clipping)
     live_wifi_label = lv_label_create(lv_scr_act());
     lv_label_set_text(live_wifi_label, "WiFi: Checking...");
     lv_obj_set_style_text_color(live_wifi_label, lv_color_hex(0xff8000), LV_PART_MAIN);
-    lv_obj_align(live_wifi_label, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_align(live_wifi_label, LV_ALIGN_BOTTOM_MID, 0, -60);
 
-    // Create live temperature label - bottom area
+    // Create live temperature label - below WiFi field to prevent RSSI clipping
     live_temp_label = lv_label_create(lv_scr_act());
     lv_label_set_text(live_temp_label, "Temp: --°C");
     lv_obj_set_style_text_color(live_temp_label, lv_color_hex(0x00ffff), LV_PART_MAIN);
-    lv_obj_align(live_temp_label, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_align(live_temp_label, LV_ALIGN_BOTTOM_MID, 0, -40);
 
     // Create status label - very bottom
     adc_status_label = lv_label_create(lv_scr_act());
@@ -476,7 +477,8 @@ void adc_display_update_timer(lv_timer_t * timer)
                 int rssi_percent = 100 + ap_info.rssi + 30;
                 if (rssi_percent > 100) rssi_percent = 100;
                 if (rssi_percent < 0) rssi_percent = 0;
-                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: %.12s %ddBm", (char*)ap_info.ssid, ap_info.rssi);
+                // Shorten SSID to prevent clipping and put RSSI on separate line
+                snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: %.8s\n      %ddBm", (char*)ap_info.ssid, ap_info.rssi);
                 lv_obj_set_style_text_color(live_wifi_label, lv_color_hex(0x00ff00), LV_PART_MAIN);
             } else {
                 snprintf(wifi_buffer, sizeof(wifi_buffer), "WiFi: Connected");
